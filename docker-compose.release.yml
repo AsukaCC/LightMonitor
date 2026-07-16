@@ -1,0 +1,38 @@
+# Production compose using GHCR image (no local build).
+# Usage:
+#   cp .env.example .env   # edit passwords / public URL
+#   docker compose -f docker-compose.release.yml up -d --pull always
+
+services:
+  lightmonitor:
+    image: ${LIGHTMONITOR_IMAGE:-ghcr.io/asukacc/lightmonitor:latest}
+    # `latest` is mutable; always check GHCR so an existing local image cannot
+    # leave a fresh deployment on an older UI.
+    pull_policy: always
+    container_name: lightmonitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${LIGHTMONITOR_PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      # Empty = auto-detect from browser Host/Origin when installing agents
+      LIGHTMONITOR_PUBLIC_URL: ${LIGHTMONITOR_PUBLIC_URL:-}
+      # Optional: agent binary source for SSH install (default GitHub Releases)
+      LIGHTMONITOR_GITHUB_REPO: ${LIGHTMONITOR_GITHUB_REPO:-AsukaCC/LightMonitor}
+      LIGHTMONITOR_AGENT_VERSION: ${LIGHTMONITOR_AGENT_VERSION:-latest}
+      LIGHTMONITOR_ADMIN_USERNAME: ${LIGHTMONITOR_ADMIN_USERNAME:-admin}
+      LIGHTMONITOR_ADMIN_PASSWORD: ${LIGHTMONITOR_ADMIN_PASSWORD:-admin}
+      LIGHTMONITOR_DATA_DIR: /app/data
+      LIGHTMONITOR_WEB_DIR: /app/bundled/web
+      LIGHTMONITOR_RELEASES_DIR: /app/releases
+      LIGHTMONITOR_VERSIONS_DIR: /app/data/versions
+      LIGHTMONITOR_MANAGED_UPDATES: "true"
+    volumes:
+      - lightmonitor-data:/app/data
+      - ${LIGHTMONITOR_SSH_DIR:-./.ssh-empty}:/root/.ssh:ro
+
+volumes:
+  lightmonitor-data:

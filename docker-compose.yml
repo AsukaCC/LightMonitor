@@ -1,0 +1,37 @@
+services:
+  lightmonitor:
+    # Prefer prebuilt image from GHCR after release:
+    #   image: ghcr.io/<owner>/lightmonitor:latest
+    # Local build:
+    build: .
+    image: ${LIGHTMONITOR_IMAGE:-lightmonitor:local}
+    container_name: lightmonitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${LIGHTMONITOR_PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      # Empty = auto-detect from browser Host/Origin when installing agents
+      LIGHTMONITOR_PUBLIC_URL: ${LIGHTMONITOR_PUBLIC_URL:-}
+      # Optional: agent binary source for SSH install (default GitHub Releases)
+      LIGHTMONITOR_GITHUB_REPO: ${LIGHTMONITOR_GITHUB_REPO:-AsukaCC/LightMonitor}
+      LIGHTMONITOR_AGENT_VERSION: ${LIGHTMONITOR_AGENT_VERSION:-latest}
+      LIGHTMONITOR_ADMIN_USERNAME: ${LIGHTMONITOR_ADMIN_USERNAME:-admin}
+      LIGHTMONITOR_ADMIN_PASSWORD: ${LIGHTMONITOR_ADMIN_PASSWORD:-admin}
+      LIGHTMONITOR_DATA_DIR: /app/data
+      LIGHTMONITOR_WEB_DIR: /app/bundled/web
+      LIGHTMONITOR_RELEASES_DIR: /app/releases
+      LIGHTMONITOR_VERSIONS_DIR: /app/data/versions
+      LIGHTMONITOR_MANAGED_UPDATES: "true"
+    volumes:
+      - lightmonitor-data:/app/data
+      # Optional: mount SSH keys for remote agent install from UI
+      # Linux:   - ${HOME}/.ssh:/root/.ssh:ro
+      # Windows: - ${USERPROFILE}/.ssh:/root/.ssh:ro
+      - ${LIGHTMONITOR_SSH_DIR:-./.ssh-empty}:/root/.ssh:ro
+
+volumes:
+  lightmonitor-data:

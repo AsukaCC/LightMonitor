@@ -1,0 +1,12 @@
+/target/
+**/target/
+**/*.rs.bk
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/
+*.log
+.ssh-empty/*
+!.ssh-empty/.gitkeep
