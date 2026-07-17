@@ -43,11 +43,9 @@ async fn main() -> anyhow::Result<()> {
             region
         }
     };
-    state.db.ensure_system_host_with_details(
-        &local_monitor::hostname(),
-        &local_address,
-        &local_region,
-    )?;
+    state
+        .db
+        .ensure_system_host_with_details(&local_address, &local_region)?;
     spawn_local_monitor(state.clone());
     spawn_offline_watcher(state.clone());
 
