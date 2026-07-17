@@ -657,11 +657,24 @@ export function AdminPage({
       <header className="top-nav">
         <div className="nav-container">
           <div className="brand">
-            <div className="brand-mark">
-              <Activity size={18} />
+            <div className="brand-main">
+              <div className="brand-mark">
+                <Activity size={18} />
+              </div>
+              <div className="brand-copy">
+                <h1>LightMonitor</h1>
+              </div>
             </div>
-            <div>
-              <h1>LightMonitor</h1>
+            <div className="nav-actions">
+              <span className="muted small hide-sm">{adminUser}</span>
+              <LanguageSwitcher />
+              <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+              <button className="icon-btn" onClick={() => void loadHosts()} title={t('刷新')} type="button">
+                <RefreshCw size={16} />
+              </button>
+              <button className="icon-btn" onClick={() => void handleLogout()} title={t('退出')} type="button">
+                <LogOut size={16} />
+              </button>
             </div>
           </div>
 
@@ -692,17 +705,6 @@ export function AdminPage({
             </button>
           </nav>
 
-          <div className="nav-actions">
-            <span className="muted small hide-sm">{adminUser}</span>
-            <LanguageSwitcher />
-            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-            <button className="icon-btn" onClick={() => void loadHosts()} title={t('刷新')} type="button">
-              <RefreshCw size={16} />
-            </button>
-            <button className="icon-btn" onClick={() => void handleLogout()} title={t('退出')} type="button">
-              <LogOut size={16} />
-            </button>
-          </div>
         </div>
       </header>
 

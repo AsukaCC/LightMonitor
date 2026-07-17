@@ -80,23 +80,27 @@ export function PublicPage({
           <div className="brand-mark">
             <Activity size={18} />
           </div>
-          <div>
+          <div className="brand-copy">
             <h1>LightMonitor</h1>
             <span>{t('公开监控')}</span>
           </div>
         </div>
         <div className="public-header-actions">
           {updatedAt && (
-            <span className="muted small">{t('更新于 {time}', { time: updatedAt.toLocaleTimeString(language) })}</span>
+            <span className="public-header-meta muted small">
+              {t('更新于 {time}', { time: updatedAt.toLocaleTimeString(language) })}
+            </span>
           )}
-          <LanguageSwitcher />
-          <button className="icon-btn" onClick={() => void load()} title={t('刷新')} type="button">
-            <RefreshCw size={18} />
-          </button>
-          <button className="icon-btn" onClick={onToggleTheme} title={t('切换主题')} type="button">
-            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-          </button>
-          <a className="btn ghost" href="/admin">
+          <div className="public-header-tools">
+            <LanguageSwitcher />
+            <button className="icon-btn" onClick={() => void load()} title={t('刷新')} type="button">
+              <RefreshCw size={16} />
+            </button>
+            <button className="icon-btn" onClick={onToggleTheme} title={t('切换主题')} type="button">
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          </div>
+          <a className="btn ghost public-header-admin" href="/admin">
             {t('管理入口')}
           </a>
         </div>

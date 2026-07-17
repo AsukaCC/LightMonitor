@@ -5,6 +5,13 @@
   gap: 12px;
 }
 
+.brand-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .brand-mark {
   width: 38px;
   height: 38px;
@@ -628,21 +635,56 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
+  gap: 12px 20px;
   margin-bottom: 28px;
-  padding: 16px 20px;
+  padding: 10px 14px 10px 12px;
   border: 2px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-elevated);
   box-shadow: var(--shadow);
 }
 
+.public-header .brand {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.public-header .brand-copy {
+  min-width: 0;
+}
+
+.public-header .brand h1 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .public-header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
-  flex-wrap: wrap;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.public-header-meta {
+  white-space: nowrap;
+  padding: 0 2px;
+}
+
+.public-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.public-header-admin {
+  flex-shrink: 0;
+  min-height: 36px;
+  height: 36px;
+  padding-inline: 14px;
 }
 
 .summary-row {
@@ -991,11 +1033,16 @@ textarea:focus {
   gap: 32px;
 }
 
+.nav-container > .brand {
+  display: contents;
+}
+
 .nav-links {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: 1;
+  order: 2;
 }
 
 .nav-links button {
@@ -1032,6 +1079,7 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 12px;
+  order: 3;
 }
 
 .admin-main {
@@ -2107,6 +2155,21 @@ textarea:focus {
 }
 
 /* Responsive Styles */
+@media (max-width: 900px) {
+  .public-header {
+    flex-wrap: wrap;
+  }
+
+  .public-header-actions {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+  }
+
+  .public-header-meta {
+    margin-right: auto;
+  }
+}
+
 @media (max-width: 768px) {
   .nav-container {
     flex-wrap: wrap;
@@ -2121,6 +2184,10 @@ textarea:focus {
     overflow-x: auto;
     padding-bottom: 4px;
     scrollbar-width: thin;
+  }
+
+  .nav-actions {
+    order: 2;
   }
 
   .admin-main {
@@ -2156,8 +2223,20 @@ textarea:focus {
   }
 
   .nav-container .brand {
-    grid-column: 1 / -1;
-    min-width: 0;
+    display: contents;
+  }
+
+  .nav-container .brand-main {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .nav-container .brand-copy {
+    display: none;
+  }
+
+  .public-header .brand-copy {
+    display: block;
   }
 
   .nav-container .brand h1 {
@@ -2167,15 +2246,15 @@ textarea:focus {
   }
 
   .nav-actions {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    justify-content: flex-end;
+    grid-column: 2;
+    grid-row: 1;
     gap: 8px;
+    flex-shrink: 0;
   }
 
   .nav-links {
     grid-column: 1 / -1;
-    grid-row: 3;
+    grid-row: 2;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     width: auto;
@@ -2236,11 +2315,27 @@ textarea:focus {
   .public-header {
     flex-direction: column;
     align-items: stretch;
-    gap: 12px;
+    gap: 10px;
+    padding: 12px;
   }
 
   .public-header-actions {
-    justify-content: flex-start;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .public-header-meta {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-right: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .public-header-admin {
+    min-height: 40px;
+    height: 40px;
   }
 
   .public-grid {
@@ -2482,6 +2577,32 @@ textarea:focus {
 }
 
 @media (max-width: 360px) {
+  .nav-container {
+    grid-template-columns: minmax(40px, 1fr) auto;
+  }
+
+  .nav-actions {
+    gap: 4px;
+  }
+
+  .nav-actions .icon-btn,
+  .nav-container .language-trigger {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+
+  .nav-container .language-trigger {
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
+
+  .nav-container .language-value,
+  .nav-container .language-chevron {
+    display: none;
+  }
+
   .login-footer {
     flex-direction: column;
     align-items: stretch;
@@ -2497,21 +2618,27 @@ textarea:focus {
     flex-wrap: nowrap;
   }
 
-  .nav-container {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .nav-actions {
-    grid-row: 2;
-    justify-content: flex-start;
-  }
-
-  .nav-links {
-    grid-row: 3;
-  }
-
   .public-header {
-    padding: 14px;
+    padding: 10px;
+    gap: 8px 10px;
+  }
+
+  .public-header-actions {
+    gap: 8px;
+  }
+
+  .public-header-meta {
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .public-header-tools {
+    margin-left: 0;
+  }
+
+  .public-header-admin {
+    margin-left: auto;
+    padding-inline: 12px;
   }
 
   .summary-row {
