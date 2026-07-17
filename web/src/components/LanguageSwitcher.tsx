@@ -5,8 +5,8 @@ import type { Language } from '../i18n'
 export function LanguageSwitcher() {
   const { language, setLanguage, t } = useI18n()
   return (
-    <label className="language-switcher" title={t('切换语言')}>
-      <Languages size={16} />
+    <div className="language-switcher" title={t('切换语言')}>
+      <Languages size={16} aria-hidden />
       <select
         aria-label={t('切换语言')}
         value={language}
@@ -16,6 +16,6 @@ export function LanguageSwitcher() {
         <option value="ja-JP">日本語</option>
         <option value="en-US">English</option>
       </select>
-    </label>
+    </div>
   )
 }

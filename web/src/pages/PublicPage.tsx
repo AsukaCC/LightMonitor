@@ -17,7 +17,7 @@ import { LanguageSwitcher } from '../components/LanguageSwitcher'
 import { useI18n } from '../i18n'
 import type { PublicHost, ThemeMode } from '../types'
 import { statusLabel } from '../types'
-import { formatCpuUsage, formatDuration, formatLoad, formatResourceUsage } from '../utils'
+import { formatCpuDetail, formatDuration, formatLoad, formatUsageDetail } from '../utils'
 
 type HostFilter = 'all' | 'online' | 'offline'
 
@@ -171,14 +171,15 @@ export function PublicPage({
               <div className="public-metrics">
                 <MetricBar
                   icon={<Cpu size={16} />}
-                  label={formatCpuUsage(host.metrics.cpu_percent, host.metrics.cpu_cores)}
+                  name="CPU"
+                  detail={formatCpuDetail(host.metrics.cpu_percent, host.metrics.cpu_cores)}
                   value={host.metrics.cpu_percent}
                   tone="cpu"
                 />
                 <MetricBar
                   icon={<MemoryStick size={16} />}
-                  label={formatResourceUsage(
-                    t('内存'),
+                  name={t('内存')}
+                  detail={formatUsageDetail(
                     host.metrics.memory_used_bytes,
                     host.metrics.memory_total_bytes,
                   )}
@@ -187,11 +188,8 @@ export function PublicPage({
                 />
                 <MetricBar
                   icon={<HardDrive size={16} />}
-                  label={formatResourceUsage(
-                    t('磁盘'),
-                    host.metrics.disk_used_bytes,
-                    host.metrics.disk_total_bytes,
-                  )}
+                  name={t('磁盘')}
+                  detail={formatUsageDetail(host.metrics.disk_used_bytes, host.metrics.disk_total_bytes)}
                   value={host.metrics.disk_percent}
                   tone="disk"
                 />
