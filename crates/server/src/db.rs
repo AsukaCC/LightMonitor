@@ -261,13 +261,9 @@ impl Db {
         self.with_conn(|conn| get_host_conn(conn, id))
     }
 
-    pub fn ensure_system_host_with_details(
-        &self,
-        hostname: &str,
-        address: &str,
-        region: &str,
-    ) -> Result<Host> {
+    pub fn ensure_system_host_with_details(&self, address: &str, region: &str) -> Result<Host> {
         let id = system_host_id();
+        let name = "本机";
         let now = Utc::now().to_rfc3339();
         let token = format!("system-{}", Uuid::new_v4());
         let tags_json = serde_json::to_string(&vec!["宿主机"])?;
@@ -286,7 +282,7 @@ impl Db {
                            NULL, NULL, ?8, ?8)",
                 params![
                     id.to_string(),
-                    hostname,
+                    name,
                     address,
                     region,
                     tags_json,
@@ -297,17 +293,10 @@ impl Db {
             )?;
             conn.execute(
                 "UPDATE hosts SET is_system = 1,
-                 name = CASE WHEN TRIM(name) = '' THEN ?1 ELSE name END, address = ?2,
+                 name = ?1, address = ?2,
                  region = CASE WHEN TRIM(?3) <> '' THEN ?3 ELSE region END,
                  agent_id = ?4, updated_at = ?5 WHERE id = ?6",
-                params![
-                    hostname,
-                    address,
-                    region,
-                    id.to_string(),
-                    now,
-                    id.to_string()
-                ],
+                params![name, address, region, id.to_string(), now, id.to_string()],
             )?;
             Ok(())
         })?;
@@ -942,20 +931,20 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lightmonitor-system-{}.db", Uuid::new_v4()));
         let db = Db::open(&path).unwrap();
         let system_host = db
-            .ensure_system_host_with_details("monitor-node", "127.0.0.1", "本机")
+            .ensure_system_host_with_details("127.0.0.1", "本机")
             .unwrap();
 
         assert!(system_host.is_system);
-        assert_eq!(system_host.name, "monitor-node");
+        assert_eq!(system_host.name, "本机");
         assert_eq!(db.list_hosts().unwrap()[0].id, system_host.id);
         assert!(db.contains_system_host(&[system_host.id]).unwrap());
         assert!(db.delete_hosts(&[system_host.id]).unwrap().is_empty());
         assert!(db.get_host(system_host.id).unwrap().is_some());
 
         let refreshed = db
-            .ensure_system_host_with_details("monitor-node", "192.168.1.8", "中国 · 广东 · 深圳")
+            .ensure_system_host_with_details("192.168.1.8", "中国 · 广东 · 深圳")
             .unwrap();
-        assert_eq!(refreshed.name, "monitor-node");
+        assert_eq!(refreshed.name, "本机");
         assert_eq!(refreshed.address, "192.168.1.8");
         assert_eq!(refreshed.region, "中国 · 广东 · 深圳");
 
@@ -986,7 +975,7 @@ mod tests {
         assert_eq!(monitored.latest.unwrap().cpu_percent, 12.5);
 
         let same_host = db
-            .ensure_system_host_with_details("renamed-node", "127.0.0.1", "本机")
+            .ensure_system_host_with_details("127.0.0.1", "本机")
             .unwrap();
         assert_eq!(same_host.id, system_host.id);
         assert_eq!(

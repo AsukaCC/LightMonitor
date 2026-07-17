@@ -12,6 +12,15 @@ export function formatCpuUsage(cpuPercent: number, cpuCores: number) {
   })
 }
 
+export function formatCpuDetail(cpuPercent: number, cpuCores: number) {
+  if (!Number.isFinite(cpuCores) || cpuCores <= 0) return '—'
+  const usedCores = (cpuPercent / 100) * cpuCores
+  return translate('已用 {used} / {total} 核', {
+    used: usedCores.toFixed(2),
+    total: cpuCores.toFixed(2),
+  })
+}
+
 export function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -22,6 +31,13 @@ export function formatBytes(value: number) {
 export function formatResourceUsage(label: string, used: number, total: number) {
   return translate('{label} 已用 {used} / {total}', {
     label: translate(label), used: formatBytes(used), total: formatBytes(total),
+  })
+}
+
+export function formatUsageDetail(used: number, total: number) {
+  return translate('已用 {used} / {total}', {
+    used: formatBytes(used),
+    total: formatBytes(total),
   })
 }
 

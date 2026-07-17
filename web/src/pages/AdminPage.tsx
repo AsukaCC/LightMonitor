@@ -52,11 +52,11 @@ import type { Host, HostForm, MetricHistoryResponse, ReleaseCatalog, ServerEvent
 import { statusLabel } from '../types'
 import {
   formatBytes,
-  formatCpuUsage,
+  formatCpuDetail,
   formatDuration,
   formatLoad,
   formatRelativeTime,
-  formatResourceUsage,
+  formatUsageDetail,
   isStaleHost,
   percent,
   readError,
@@ -642,8 +642,10 @@ export function AdminPage({
           </button>
           <div className="login-footer">
             <a href="/">{t('返回公开监控')}</a>
-            <LanguageSwitcher />
-            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+            <div className="login-footer-actions">
+              <LanguageSwitcher />
+              <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+            </div>
           </div>
         </form>
       </main>
@@ -2002,37 +2004,62 @@ function HostMetricSummary({ host }: { host: Host }) {
   const memoryPercent = percent(sample.memory_used_bytes, sample.memory_total_bytes)
   const disk = sample.disks[0]
   const diskPercent = disk ? percent(disk.total_bytes - disk.available_bytes, disk.total_bytes) : 0
+  const rxRate =
+    sample.network_rx_rate !== undefined ? ` (${formatBytes(sample.network_rx_rate)}/s)` : ''
+  const txRate =
+    sample.network_tx_rate !== undefined ? ` (${formatBytes(sample.network_tx_rate)}/s)` : ''
 
   return (
     <div className="dashboard-host-metrics">
-      <MetricBar
-        icon={<Cpu size={16} />}
-        label={formatCpuUsage(sample.cpu_percent, sample.cpu_cores)}
-        value={sample.cpu_percent}
-        tone="cpu"
-      />
-      <MetricBar
-        icon={<MemoryStick size={16} />}
-        label={formatResourceUsage(t('内存'), sample.memory_used_bytes, sample.memory_total_bytes)}
-        value={memoryPercent}
-        tone="mem"
-      />
-      <MetricBar
-        icon={<HardDrive size={16} />}
-        label={disk ? formatResourceUsage(t('磁盘'), disk.total_bytes - disk.available_bytes, disk.total_bytes) : t('磁盘 无数据')}
-        value={diskPercent}
-        tone="disk"
-      />
+      <div className="dashboard-host-resources">
+        <MetricBar
+          icon={<Cpu size={15} />}
+          name="CPU"
+          detail={formatCpuDetail(sample.cpu_percent, sample.cpu_cores)}
+          value={sample.cpu_percent}
+          tone="cpu"
+        />
+        <MetricBar
+          icon={<MemoryStick size={15} />}
+          name={t('内存')}
+          detail={formatUsageDetail(sample.memory_used_bytes, sample.memory_total_bytes)}
+          value={memoryPercent}
+          tone="mem"
+        />
+        <MetricBar
+          icon={<HardDrive size={15} />}
+          name={t('磁盘')}
+          detail={
+            disk
+              ? formatUsageDetail(disk.total_bytes - disk.available_bytes, disk.total_bytes)
+              : t('磁盘 无数据')
+          }
+          value={diskPercent}
+          tone="disk"
+        />
+      </div>
       <div className="dashboard-host-live">
-        <span>
-          <Network size={14} /> {t('接收')} {formatBytes(sample.network_rx_bytes)}
-          {sample.network_rx_rate !== undefined && ` (${formatBytes(sample.network_rx_rate)}/s)`}
-        </span>
-        <span>
-          {t('发送')} {formatBytes(sample.network_tx_bytes)}
-          {sample.network_tx_rate !== undefined && ` (${formatBytes(sample.network_tx_rate)}/s)`}
-        </span>
-        <span>{t('负载')} {formatLoad(sample.load_average)}</span>
+        <div className="live-stat">
+          <span className="live-stat-label">
+            <Network size={14} />
+            {t('接收')}
+          </span>
+          <strong className="live-stat-value">
+            {formatBytes(sample.network_rx_bytes)}
+            {rxRate}
+          </strong>
+        </div>
+        <div className="live-stat">
+          <span className="live-stat-label">{t('发送')}</span>
+          <strong className="live-stat-value">
+            {formatBytes(sample.network_tx_bytes)}
+            {txRate}
+          </strong>
+        </div>
+        <div className="live-stat">
+          <span className="live-stat-label">{t('负载')}</span>
+          <strong className="live-stat-value">{formatLoad(sample.load_average)}</strong>
+        </div>
       </div>
     </div>
   )
@@ -2104,18 +2131,21 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
               <div className="detail-metrics">
                 <MetricBar
                   icon={<Cpu size={16} />}
-                  label={formatCpuUsage(sample.cpu_percent, sample.cpu_cores)}
+                  name="CPU"
+                  detail={formatCpuDetail(sample.cpu_percent, sample.cpu_cores)}
                   value={sample.cpu_percent}
                   tone="cpu"
                 />
                 <MetricBar
                   icon={<MemoryStick size={16} />}
-                  label={formatResourceUsage(t('内存'), sample.memory_used_bytes, sample.memory_total_bytes)}
+                  name={t('内存')}
+                  detail={formatUsageDetail(sample.memory_used_bytes, sample.memory_total_bytes)}
                   value={percent(sample.memory_used_bytes, sample.memory_total_bytes)}
                   tone="mem"
                 />
                 <MetricBar
-                  label={formatResourceUsage(t('交换区'), sample.swap_used_bytes, sample.swap_total_bytes)}
+                  name={t('交换区')}
+                  detail={formatUsageDetail(sample.swap_used_bytes, sample.swap_total_bytes)}
                   value={percent(sample.swap_used_bytes, sample.swap_total_bytes)}
                   tone="mem"
                 />
@@ -2144,8 +2174,8 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
                     <div className="detail-disk" key={`${disk.name}-${disk.mount_point}`}>
                       <MetricBar
                         icon={<HardDrive size={16} />}
-                        label={formatResourceUsage(
-                          `${disk.name} · ${disk.mount_point}`,
+                        name={`${disk.name} · ${disk.mount_point}`}
+                        detail={formatUsageDetail(
                           disk.total_bytes - disk.available_bytes,
                           disk.total_bytes,
                         )}
