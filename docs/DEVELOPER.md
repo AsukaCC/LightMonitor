@@ -129,7 +129,7 @@ git push origin v1.0.1
 
 说明：
 
-- 仅 `git push` 到分支 **不会** 发版；必须推送 `v*` tag（如 `v1.0.1`）。  
+- 仅 `git push` 到分支 **不会** 发版；必须推送 `v*` tag（如 `v1.0.1`）。
 - `workflow_dispatch` 可在 Actions 里手动触发工作流，但正式发布 Release / 推镜像仍以 **推送 tag** 为准。  
 - 镜像标签会去掉 tag 的 `v` 前缀：`v1.0.1` → 镜像 `1.0.1`。
 
