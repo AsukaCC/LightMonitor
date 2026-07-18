@@ -84,6 +84,13 @@ export function formatRelativeTime(iso?: string) {
   return new Date(iso).toLocaleString(currentLocale())
 }
 
+export function formatDateTime(iso?: string) {
+  if (!iso) return translate('从未上报')
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return translate('未知')
+  return date.toLocaleString(currentLocale())
+}
+
 export function isStaleHost(status: string, hasAgent: boolean) {
   return !hasAgent || status === 'offline' || status === 'error' || status === 'pending'
 }
