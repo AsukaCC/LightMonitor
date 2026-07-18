@@ -24,14 +24,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The runtime image is Debian bookworm (glibc 2.36). Keep GNU
+          # release binaries on an older compatible glibc baseline.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             asset_agent: lightmonitor-agent-linux-x86_64
             asset_server: lightmonitor-server-linux-x86_64
             asset_bundle: lightmonitor-app-linux-x86_64.tar.gz
             cross: false
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             asset_agent: lightmonitor-agent-linux-aarch64
             asset_server: lightmonitor-server-linux-aarch64
             asset_bundle: lightmonitor-app-linux-aarch64.tar.gz

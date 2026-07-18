@@ -3,6 +3,7 @@ use crate::state::AppState;
 use anyhow::{Context, anyhow, bail};
 use flate2::read::GzDecoder;
 use reqwest::Client;
+use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -27,7 +28,7 @@ struct GithubRelease {
 #[derive(Debug, Clone, Deserialize)]
 struct GithubAsset {
     name: String,
-    browser_download_url: String,
+    url: String,
     size: u64,
 }
 
@@ -91,9 +92,9 @@ pub async fn install_and_activate(state: &AppState, requested: &str) -> anyhow::
     }
 
     let destination = version_dir(state, &requested);
-    if !valid_version_dir(&destination) {
-        download_and_unpack(release, bundle, &destination).await?;
-    }
+    // Release assets can be replaced under the same tag. Always re-fetch the
+    // selected bundle so a previously installed copy cannot mask a republish.
+    download_and_unpack(release, bundle, &destination).await?;
 
     let current = env!("CARGO_PKG_VERSION");
     if current != requested {
@@ -239,7 +240,8 @@ fn unpack_bundle(bytes: &[u8], destination: &Path) -> anyhow::Result<()> {
 
 async fn download_text(client: &Client, asset: &GithubAsset) -> anyhow::Result<String> {
     client
-        .get(&asset.browser_download_url)
+        .get(&asset.url)
+        .header(ACCEPT, "application/octet-stream")
         .send()
         .await
         .with_context(|| format!("failed to download {}", asset.name))?
@@ -251,7 +253,8 @@ async fn download_text(client: &Client, asset: &GithubAsset) -> anyhow::Result<S
 
 async fn download_bytes(client: &Client, asset: &GithubAsset) -> anyhow::Result<Vec<u8>> {
     Ok(client
-        .get(&asset.browser_download_url)
+        .get(&asset.url)
+        .header(ACCEPT, "application/octet-stream")
         .send()
         .await
         .with_context(|| format!("failed to download {}", asset.name))?
