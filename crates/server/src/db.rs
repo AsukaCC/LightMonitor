@@ -1,9 +1,9 @@
 use crate::credential::CredentialCipher;
 use crate::models::{
-    CreateHostRequest, Host, HostStatus, InstallLog, MetricHistoryPoint, SystemSample,
+    CreateHostRequest, Host, HostStatus, InstallLog, MetricHistoryPoint, SshKey, SystemSample,
     UpdateHostRequest,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -65,6 +65,14 @@ impl Db {
                 username TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ssh_keys (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                storage_path TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS metric_history (
@@ -180,6 +188,120 @@ impl Db {
             )
             .optional()
             .map_err(Into::into)
+        })
+    }
+
+    pub fn list_ssh_keys(&self) -> Result<Vec<SshKey>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, storage_path, size_bytes, updated_at
+                 FROM ssh_keys ORDER BY updated_at DESC, name ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            let mut keys = Vec::new();
+            for row in rows {
+                let (id, name, storage_path, size_bytes, updated_at) = row?;
+                let id = Uuid::parse_str(&id)?;
+                let in_use = conn.query_row(
+                    "SELECT COUNT(*) FROM hosts WHERE ssh_key_path = ?1",
+                    params![storage_path],
+                    |row| row.get::<_, i64>(0),
+                )? > 0;
+                keys.push(SshKey {
+                    id,
+                    name,
+                    size_bytes: size_bytes.max(0) as u64,
+                    updated_at: parse_dt(&updated_at),
+                    in_use,
+                });
+            }
+            Ok(keys)
+        })
+    }
+
+    pub fn get_ssh_key(&self, id: Uuid) -> Result<Option<(String, String)>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT name, storage_path FROM ssh_keys WHERE id = ?1",
+                params![id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    pub fn create_ssh_key(
+        &self,
+        id: Uuid,
+        name: &str,
+        storage_path: &str,
+        size_bytes: u64,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO ssh_keys (id, name, storage_path, size_bytes, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id.to_string(),
+                    name,
+                    storage_path,
+                    size_bytes as i64,
+                    Utc::now().to_rfc3339()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn update_ssh_key(&self, id: Uuid, name: &str, size_bytes: u64) -> Result<bool> {
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE ssh_keys SET name = ?1, size_bytes = ?2, updated_at = ?3 WHERE id = ?4",
+                params![
+                    name,
+                    size_bytes as i64,
+                    Utc::now().to_rfc3339(),
+                    id.to_string()
+                ],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    pub fn delete_ssh_key(&self, id: Uuid) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let Some(storage_path) = conn
+                .query_row(
+                    "SELECT storage_path FROM ssh_keys WHERE id = ?1",
+                    params![id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let in_use = conn.query_row(
+                "SELECT COUNT(*) FROM hosts WHERE ssh_key_path = ?1",
+                params![storage_path],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if in_use > 0 {
+                bail!("SSH key is used by {in_use} host(s)");
+            }
+            conn.execute(
+                "DELETE FROM ssh_keys WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+            Ok(Some(storage_path))
         })
     }
 
@@ -1089,6 +1211,44 @@ mod tests {
         assert_eq!(history.last().unwrap().network_rx_bytes, 9 * 1024);
         assert!(history.last().unwrap().memory_percent > 0.0);
 
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn manages_ssh_keys_and_prevents_deleting_keys_in_use() {
+        let path =
+            std::env::temp_dir().join(format!("lightmonitor-ssh-keys-{}.db", Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        let key_id = Uuid::new_v4();
+        let storage_path = std::env::temp_dir()
+            .join(format!("lightmonitor-ssh-key-{}", Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        db.create_ssh_key(key_id, "production", &storage_path, 42)
+            .unwrap();
+        assert_eq!(db.list_ssh_keys().unwrap()[0].name, "production");
+
+        let host = db
+            .create_host(
+                CreateHostRequest {
+                    name: "key-host".to_string(),
+                    address: "192.0.2.20".to_string(),
+                    region: String::new(),
+                    ssh_user: "root".to_string(),
+                    ssh_port: 22,
+                    ssh_password: String::new(),
+                    tags: Vec::new(),
+                },
+                "key-host-token".to_string(),
+            )
+            .unwrap();
+        db.set_ssh_key_path(host.id, &storage_path).unwrap();
+        assert!(db.list_ssh_keys().unwrap()[0].in_use);
+        assert!(db.delete_ssh_key(key_id).is_err());
+
+        db.set_ssh_key_path(host.id, "").unwrap();
+        assert_eq!(db.delete_ssh_key(key_id).unwrap(), Some(storage_path));
         drop(db);
         cleanup(&path);
     }

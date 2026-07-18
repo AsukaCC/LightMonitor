@@ -34,7 +34,12 @@ struct GithubAsset {
 
 pub async fn release_catalog(state: &AppState) -> anyhow::Result<ReleaseCatalog> {
     let releases = fetch_releases(&state.config.github_repo).await?;
-    let current = env!("CARGO_PKG_VERSION").to_string();
+    let bundled_version = env!("CARGO_PKG_VERSION").to_string();
+    let current = std::env::var("LIGHTMONITOR_RUNNING_VERSION")
+        .map(|version| normalize_version(&version))
+        .ok()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| bundled_version.clone());
     let expected_asset = platform_asset_name();
     let mut catalog_releases = Vec::new();
 
@@ -43,9 +48,12 @@ pub async fn release_catalog(state: &AppState) -> anyhow::Result<ReleaseCatalog>
             .as_ref()
             .and_then(|expected| release.assets.iter().find(|asset| asset.name == *expected));
         let version = normalize_version(&release.tag_name);
+        let installed = valid_version_dir(&version_dir(state, &version));
         catalog_releases.push(AppRelease {
-            installed: valid_version_dir(&version_dir(state, &version)),
-            active: version == current,
+            installed,
+            // The launcher always uses the bundled binary for its default
+            // version, even when a same-version copy exists in the data volume.
+            active: version == current && !(version == bundled_version && installed),
             version,
             name: release.name.unwrap_or(release.tag_name),
             published_at: release.published_at,
@@ -112,9 +120,7 @@ pub fn delete_downloaded_version(state: &AppState, requested: &str) -> anyhow::R
     let active_version = fs::read_to_string(&active_file)
         .ok()
         .map(|version| normalize_version(&version));
-    if requested == env!("CARGO_PKG_VERSION")
-        || active_version.as_deref() == Some(requested.as_str())
-    {
+    if active_version.as_deref() == Some(requested.as_str()) {
         bail!("cannot delete the active version");
     }
 
@@ -328,6 +334,9 @@ fn atomic_write(path: &Path, value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::db::Db;
+    use crate::state::AppState;
 
     #[test]
     fn validates_release_versions() {
@@ -345,5 +354,40 @@ mod tests {
         );
         assert_eq!(checksum_for(checksums, "two.tar.gz"), Some("b".repeat(64)));
         assert_eq!(checksum_for(checksums, "missing.tar.gz"), None);
+    }
+
+    #[test]
+    fn deletes_a_non_active_copy_of_the_bundled_version() {
+        let root =
+            std::env::temp_dir().join(format!("lightmonitor-version-delete-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let versions_dir = data_dir.join("versions");
+        let version = env!("CARGO_PKG_VERSION");
+        let version_dir = versions_dir.join(version);
+        fs::create_dir_all(version_dir.join("web")).unwrap();
+        fs::write(version_dir.join("lightmonitor-server"), b"server").unwrap();
+        fs::write(version_dir.join("web/index.html"), b"index").unwrap();
+        let db = Db::open(&data_dir.join("lightmonitor.db")).unwrap();
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            data_dir: data_dir.clone(),
+            web_dir: root.join("web"),
+            releases_dir: root.join("releases"),
+            versions_dir,
+            ssh_keys_dir: data_dir.join("ssh-keys"),
+            public_url: String::new(),
+            github_repo: "owner/repo".to_string(),
+            managed_updates: true,
+            admin_username: "admin".to_string(),
+            admin_password: "admin".to_string(),
+            offline_seconds: 30,
+            session_ttl_hours: 24,
+        };
+        let state = AppState::new(db, config);
+
+        assert!(delete_downloaded_version(&state, version).unwrap());
+        assert!(!version_dir.exists());
+        let _ = fs::remove_dir_all(root);
     }
 }

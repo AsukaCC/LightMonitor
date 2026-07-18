@@ -4,16 +4,17 @@ use crate::models::{
     CreateHostRequest, DeleteHostsRequest, Host, HostStatus, InstallAgentRequest, InstallLog,
     LoginRequest, LoginResponse, MetricHistoryQuery, MetricHistoryResponse, MetricReport,
     RegisterAgentRequest, RegisterAgentResponse, ReleaseCatalog, ServerEvent, SessionResponse,
-    UpdateHostIntervalRequest, UpdateHostRequest,
+    SshKey, UpdateHostIntervalRequest, UpdateHostRequest,
 };
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{Duration, Utc};
 use std::convert::Infallible;
+use std::fs;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -172,6 +173,163 @@ pub async fn session(user: AuthUser) -> Json<SessionResponse> {
     Json(SessionResponse {
         username: user.username,
     })
+}
+
+pub async fn list_ssh_keys(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<Vec<SshKey>>, ApiError> {
+    state
+        .db
+        .list_ssh_keys()
+        .map(Json)
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+pub async fn upload_ssh_key(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    multipart: Multipart,
+) -> Result<Json<SshKey>, ApiError> {
+    let (name, fallback_name, contents) = read_ssh_key_upload(multipart).await?;
+    let name = crate::ssh_keys::validate_name(
+        name.as_deref()
+            .or(fallback_name.as_deref())
+            .unwrap_or("SSH key"),
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    crate::ssh_keys::validate_contents(&contents)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+
+    let id = Uuid::new_v4();
+    let path = crate::ssh_keys::path_for(&state.config.ssh_keys_dir, id);
+    crate::ssh_keys::write_private(&path, &contents)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Err(error) =
+        state
+            .db
+            .create_ssh_key(id, &name, &path.to_string_lossy(), contents.len() as u64)
+    {
+        let _ = fs::remove_file(&path);
+        return Err(ApiError::internal(error.to_string()));
+    }
+
+    let key = state
+        .db
+        .list_ssh_keys()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .find(|key| key.id == id)
+        .ok_or_else(|| ApiError::internal("uploaded SSH key disappeared"))?;
+    Ok(Json(key))
+}
+
+pub async fn update_ssh_key(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+    multipart: Multipart,
+) -> Result<Json<SshKey>, ApiError> {
+    let (name, _fallback_name, contents) = read_ssh_key_upload(multipart).await?;
+    let (existing_name, storage_path) = state
+        .db
+        .get_ssh_key(id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("SSH key not found"))?;
+    let name = match name.as_deref() {
+        Some(name) => crate::ssh_keys::validate_name(name),
+        None => Ok(existing_name),
+    }
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    crate::ssh_keys::validate_contents(&contents)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let path = std::path::PathBuf::from(&storage_path);
+    if !path.starts_with(&state.config.ssh_keys_dir) {
+        return Err(ApiError::internal(
+            "SSH key storage path is outside the key directory",
+        ));
+    }
+    crate::ssh_keys::write_private(&path, &contents)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !state
+        .db
+        .update_ssh_key(id, &name, contents.len() as u64)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        return Err(ApiError::not_found("SSH key not found"));
+    }
+    let key = state
+        .db
+        .list_ssh_keys()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .find(|key| key.id == id)
+        .ok_or_else(|| ApiError::internal("updated SSH key disappeared"))?;
+    Ok(Json(key))
+}
+
+pub async fn delete_ssh_key(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let path = state.db.delete_ssh_key(id).map_err(|error| {
+        let message = error.to_string();
+        if message.contains("used by") {
+            ApiError::conflict(message)
+        } else {
+            ApiError::internal(message)
+        }
+    })?;
+    let Some(path) = path else {
+        return Err(ApiError::not_found("SSH key not found"));
+    };
+    let path = std::path::PathBuf::from(path);
+    if !path.starts_with(&state.config.ssh_keys_dir) {
+        return Err(ApiError::internal(
+            "SSH key storage path is outside the key directory",
+        ));
+    }
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn read_ssh_key_upload(
+    mut multipart: Multipart,
+) -> Result<(Option<String>, Option<String>, Vec<u8>), ApiError> {
+    let mut name = None;
+    let mut fallback_name = None;
+    let mut contents = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("invalid SSH key upload: {error}")))?
+    {
+        match field.name() {
+            Some("name") => {
+                name = Some(field.text().await.map_err(|error| {
+                    ApiError::bad_request(format!("invalid SSH key name: {error}"))
+                })?);
+            }
+            Some("file") => {
+                fallback_name = field.file_name().map(str::to_string);
+                contents = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|error| {
+                            ApiError::bad_request(format!("invalid SSH key file: {error}"))
+                        })?
+                        .to_vec(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let contents = contents.ok_or_else(|| ApiError::bad_request("SSH key file is required"))?;
+    Ok((name, fallback_name, contents))
 }
 
 pub async fn list_hosts(
@@ -478,7 +636,15 @@ pub async fn install_agent(
         .ssh_credentials(id)
         .map_err(|e| ApiError::internal(e.to_string()))?
         .unwrap_or_default();
-    if body.use_saved_identity {
+    if let Some(key_id) = body.ssh_key_id {
+        let (_, managed_path) = state
+            .db
+            .get_ssh_key(key_id)
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .ok_or_else(|| ApiError::bad_request("selected SSH key no longer exists"))?;
+        key_path = managed_path;
+        password.clear();
+    } else if body.use_saved_identity {
         if stored_identity.is_empty() {
             return Err(ApiError::bad_request(
                 "no saved SSH identity file is available for this host",

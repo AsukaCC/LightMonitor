@@ -1,4 +1,4 @@
-import type { Host, PublicHost, ReleaseCatalog } from './types'
+import type { Host, PublicHost, ReleaseCatalog, SshKey } from './types'
 import { readError } from './utils'
 import { translate } from './i18n'
 
@@ -72,6 +72,44 @@ export async function applyRelease(version: string, token: string, onUnauthorize
 
 export async function deleteDownloadedRelease(version: string, token: string, onUnauthorized?: () => void) {
   const response = await authFetch(`/api/system/releases/${encodeURIComponent(version)}`, {
+    method: 'DELETE',
+  }, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+}
+
+export async function fetchSshKeys(token: string, onUnauthorized?: () => void) {
+  const response = await authFetch('/api/ssh-keys', undefined, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as SshKey[]
+}
+
+function sshKeyForm(file: File, name?: string) {
+  const body = new FormData()
+  if (name?.trim()) body.append('name', name.trim())
+  body.append('file', file, file.name)
+  return body
+}
+
+export async function uploadSshKey(file: File, name: string, token: string, onUnauthorized?: () => void) {
+  const response = await authFetch('/api/ssh-keys', {
+    method: 'POST',
+    body: sshKeyForm(file, name),
+  }, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as SshKey
+}
+
+export async function updateSshKey(id: string, file: File, name: string | undefined, token: string, onUnauthorized?: () => void) {
+  const response = await authFetch(`/api/ssh-keys/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: sshKeyForm(file, name),
+  }, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as SshKey
+}
+
+export async function deleteSshKey(id: string, token: string, onUnauthorized?: () => void) {
+  const response = await authFetch(`/api/ssh-keys/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   }, token, onUnauthorized)
   if (!response.ok) throw new Error(await readError(response))

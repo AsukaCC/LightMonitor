@@ -9,6 +9,7 @@ pub struct Config {
     pub web_dir: PathBuf,
     pub releases_dir: PathBuf,
     pub versions_dir: PathBuf,
+    pub ssh_keys_dir: PathBuf,
     pub public_url: String,
     pub github_repo: String,
     pub managed_updates: bool,
@@ -40,6 +41,9 @@ impl Config {
         let versions_dir = env::var("LIGHTMONITOR_VERSIONS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| data_dir.join("versions"));
+        let ssh_keys_dir = env::var("LIGHTMONITOR_SSH_KEYS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| data_dir.join("ssh-keys"));
         // Optional override for agent callback URL. Empty / placeholder / loopback
         // means handlers auto-detect from the current HTTP request.
         let public_url = env::var("LIGHTMONITOR_PUBLIC_URL")
@@ -74,6 +78,7 @@ impl Config {
             web_dir,
             releases_dir,
             versions_dir,
+            ssh_keys_dir,
             public_url,
             github_repo,
             managed_updates,

@@ -294,15 +294,27 @@ pub struct MetricReport {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InstallAgentRequest {
-    /// Optional private key path inside the server container/host.
+    /// Optional legacy private key path inside the server container/host.
     #[serde(default)]
     pub ssh_key_path: String,
+    /// Managed SSH key uploaded to the server data volume.
+    #[serde(default)]
+    pub ssh_key_id: Option<Uuid>,
     /// Optional SSH password (password auth). Prefer key when both set.
     #[serde(default)]
     pub ssh_password: String,
     /// Reuse the identity file path saved after a previous successful install.
     #[serde(default)]
     pub use_saved_identity: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SshKey {
+    pub id: Uuid,
+    pub name: String,
+    pub size_bytes: u64,
+    pub updated_at: DateTime<Utc>,
+    pub in_use: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

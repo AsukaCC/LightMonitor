@@ -6,6 +6,7 @@ mod geo;
 mod local_monitor;
 mod models;
 mod routes;
+mod ssh_keys;
 mod state;
 mod updater;
 
@@ -30,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     std::fs::create_dir_all(&config.releases_dir)?;
     std::fs::create_dir_all(&config.versions_dir)?;
+    std::fs::create_dir_all(&config.ssh_keys_dir)?;
 
     let db = Db::open(&config.db_path())?;
     let state = AppState::new(db, config.clone());
@@ -54,6 +56,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/login", post(routes::login))
         .route("/auth/logout", post(routes::logout))
         .route("/auth/session", get(routes::session))
+        .route(
+            "/ssh-keys",
+            get(routes::list_ssh_keys).post(routes::upload_ssh_key),
+        )
+        .route(
+            "/ssh-keys/{id}",
+            put(routes::update_ssh_key).delete(routes::delete_ssh_key),
+        )
         .route("/public/hosts", get(routes::list_public_hosts))
         .route("/system/releases", get(routes::list_app_releases))
         .route("/system/releases/apply", post(routes::apply_app_release))

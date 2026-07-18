@@ -70,6 +70,14 @@ export type Host = {
   created_at: string
 }
 
+export type SshKey = {
+  id: string
+  name: string
+  size_bytes: number
+  updated_at: string
+  in_use: boolean
+}
+
 export type PublicMetrics = {
   cpu_cores: number
   cpu_percent: number

@@ -32,6 +32,7 @@ services:
       LIGHTMONITOR_MANAGED_UPDATES: "true"
     volumes:
       - lightmonitor-data:/app/data
+      # Optional legacy path; use the admin console's Key management for uploads.
       - ${LIGHTMONITOR_SSH_DIR:-./.ssh-empty}:/root/.ssh:ro
 
 volumes:

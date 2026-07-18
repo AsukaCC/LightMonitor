@@ -28,7 +28,8 @@ services:
       LIGHTMONITOR_MANAGED_UPDATES: "true"
     volumes:
       - lightmonitor-data:/app/data
-      # Optional: mount SSH keys for remote agent install from UI
+      # Optional legacy path: managed keys uploaded in the UI are stored in
+      # lightmonitor-data and do not require this mount.
       # Linux:   - ${HOME}/.ssh:/root/.ssh:ro
       # Windows: - ${USERPROFILE}/.ssh:/root/.ssh:ro
       - ${LIGHTMONITOR_SSH_DIR:-./.ssh-empty}:/root/.ssh:ro

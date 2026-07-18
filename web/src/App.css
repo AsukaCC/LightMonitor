@@ -539,6 +539,69 @@
   background: var(--bg-elevated);
 }
 
+.ssh-key-upload {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(260px, 1.2fr) auto;
+  align-items: end;
+  gap: 14px;
+  padding: 16px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+
+.ssh-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.ssh-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated-solid);
+}
+
+.ssh-key-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ssh-key-info strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-key-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.file-picker {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-picker input[type='file'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .version-overview > div {
   display: grid;
   gap: 4px;
@@ -610,6 +673,25 @@
 }
 
 @media (max-width: 640px) {
+  .ssh-key-upload {
+    grid-template-columns: 1fr;
+  }
+
+  .ssh-key-upload .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .ssh-key-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ssh-key-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
   .version-overview {
     grid-template-columns: 1fr 1fr auto;
     padding-inline: 12px;
@@ -1032,6 +1114,26 @@ textarea:focus {
 
 .input-with-icon input {
   padding-left: 40px;
+  padding-right: 42px;
+}
+
+.input-with-icon .password-toggle {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.input-with-icon .password-toggle:hover {
+  color: var(--accent);
 }
 
 /* Admin shell */

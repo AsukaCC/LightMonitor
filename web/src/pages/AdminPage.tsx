@@ -9,6 +9,7 @@ import {
   Download,
   Edit3,
   Eye,
+  EyeOff,
   ExternalLink,
   HardDrive,
   Copy,
@@ -38,6 +39,7 @@ import {
   authFetch,
   fetchHosts,
   fetchReleaseCatalog,
+  fetchSshKeys,
   fetchSession,
   deleteDownloadedRelease,
   login,
@@ -48,9 +50,10 @@ import {
 import { MetricBar } from '../components/MetricBar'
 import { LanguageSwitcher } from '../components/LanguageSwitcher'
 import { ProjectFooter } from '../components/ProjectFooter'
+import { SshKeyPanel } from '../components/SshKeyPanel'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { translate, useI18n } from '../i18n'
-import type { Host, HostForm, MetricHistoryResponse, ReleaseCatalog, ServerEvent, ThemeMode } from '../types'
+import type { Host, HostForm, MetricHistoryResponse, ReleaseCatalog, ServerEvent, SshKey, ThemeMode } from '../types'
 import { statusLabel } from '../types'
 import {
   formatBytes,
@@ -65,7 +68,7 @@ import {
 } from '../utils'
 
 type AuthStatus = 'checking' | 'anonymous' | 'authenticated'
-type ActiveView = 'dashboard' | 'hosts' | 'versions'
+type ActiveView = 'dashboard' | 'hosts' | 'versions' | 'keys'
 type HostModalMode = 'create' | 'edit'
 type HostFilter = 'all' | 'online' | 'offline' | 'never' | 'installing'
 type InstallPhase = 'idle' | 'installing' | 'success' | 'error'
@@ -118,10 +121,14 @@ export function AdminPage({
   const [copiedItem, setCopiedItem] = useState<string>()
   const [hostPage, setHostPage] = useState(1)
   const [form, setForm] = useState<HostForm>(initialForm)
-  const [installKeyPath, setInstallKeyPath] = useState('')
+  const [installKeyId, setInstallKeyId] = useState('')
   const [installPassword, setInstallPassword] = useState('')
   const [installAuth, setInstallAuth] = useState<InstallAuth>('password')
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
+  const [loginPasswordVisible, setLoginPasswordVisible] = useState(false)
+  const [sshKeys, setSshKeys] = useState<SshKey[]>([])
+  const [sshKeysLoading, setSshKeysLoading] = useState(false)
+  const [sshKeysError, setSshKeysError] = useState('')
   const [token, setToken] = useState(() => sessionStorage.getItem(tokenStorageKey) ?? '')
   const [adminUser, setAdminUser] = useState(() => sessionStorage.getItem(userStorageKey) ?? '')
   const [authStatus, setAuthStatus] = useState<AuthStatus>(() =>
@@ -221,6 +228,7 @@ export function AdminPage({
         const data = await fetchHosts(token, clearSession)
         if (cancelled) return
         setHosts(data)
+        void loadSshKeys()
         setAuthStatus('authenticated')
 
         eventController = new AbortController()
@@ -260,6 +268,8 @@ export function AdminPage({
     setAdminUser('')
     setAuthStatus('anonymous')
     setHosts([])
+    setSshKeys([])
+    setSshKeysError('')
     setDetailHostId(undefined)
     setSelectedHostIds([])
     setIntervalHostIds([])
@@ -274,6 +284,19 @@ export function AdminPage({
     setSelectedHostIds((current) =>
       current.filter((id) => data.some((host) => host.id === id && !host.is_system)),
     )
+  }
+
+  async function loadSshKeys() {
+    if (!token) return
+    setSshKeysLoading(true)
+    setSshKeysError('')
+    try {
+      setSshKeys(await fetchSshKeys(token, clearSession))
+    } catch (err) {
+      setSshKeysError(err instanceof Error ? err.message : t('密钥列表加载失败'))
+    } finally {
+      setSshKeysLoading(false)
+    }
   }
 
   async function submitLogin(event: FormEvent<HTMLFormElement>) {
@@ -386,7 +409,7 @@ export function AdminPage({
     setInstallHostId(host.id)
     setInstallAuth(host.has_ssh_identity ? 'identity' : host.has_ssh_password ? 'saved' : 'password')
     setInstallPassword('')
-    setInstallKeyPath('/root/.ssh/id_rsa')
+    setInstallKeyId(sshKeys[0]?.id ?? '')
     setInstallPhase(host.status === 'installing' ? 'installing' : 'idle')
     setInstallError('')
     setManualInstallOpen(false)
@@ -400,6 +423,7 @@ export function AdminPage({
     if (installPhase === 'installing') return
     setInstallHostId(undefined)
     setInstallPassword('')
+    setInstallKeyId('')
     setTokenInfo(undefined)
     setManualInstallOpen(false)
     setInstallError('')
@@ -523,8 +547,8 @@ export function AdminPage({
       if (installAuth === 'password' && !installPassword.trim()) {
         throw new Error(t('请填写 SSH 密码'))
       }
-      if (installAuth === 'key' && !installKeyPath.trim()) {
-        throw new Error(t('请填写 SSH 私钥路径'))
+      if (installAuth === 'key' && !installKeyId) {
+        throw new Error(t('请选择 SSH 私钥'))
       }
       const response = await authFetch(
         `/api/hosts/${installHostId}/install-agent`,
@@ -532,7 +556,8 @@ export function AdminPage({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            ssh_key_path: installAuth === 'key' ? installKeyPath : '',
+            ssh_key_path: '',
+            ssh_key_id: installAuth === 'key' ? installKeyId : undefined,
             ssh_password: installAuth === 'password' ? installPassword : '',
             use_saved_identity: installAuth === 'identity',
           }),
@@ -632,10 +657,19 @@ export function AdminPage({
               <input
                 autoComplete="current-password"
                 required
-                type="password"
+                type={loginPasswordVisible ? 'text' : 'password'}
                 value={loginForm.password}
                 onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
               />
+              <button
+                aria-label={loginPasswordVisible ? t('隐藏密码') : t('显示密码')}
+                className="password-toggle"
+                onClick={() => setLoginPasswordVisible((visible) => !visible)}
+                title={loginPasswordVisible ? t('隐藏密码') : t('显示密码')}
+                type="button"
+              >
+                {loginPasswordVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
             </div>
           </label>
           {loginError && <div className="banner error">{loginError}</div>}
@@ -705,6 +739,14 @@ export function AdminPage({
               <PackageSearch size={16} />
               {t('版本管理')}
             </button>
+            <button
+              className={activeView === 'keys' ? 'active' : ''}
+              onClick={() => navigate('keys')}
+              type="button"
+            >
+              <KeyRound size={16} />
+              {t('密钥管理')}
+            </button>
           </nav>
 
         </div>
@@ -712,7 +754,15 @@ export function AdminPage({
 
       <main className="admin-main">
         <header className="page-header">
-          <h2>{activeView === 'dashboard' ? t('主机概览') : activeView === 'hosts' ? t('主机列表') : t('版本管理')}</h2>
+          <h2>
+            {activeView === 'dashboard'
+              ? t('主机概览')
+              : activeView === 'hosts'
+                ? t('主机列表')
+                : activeView === 'versions'
+                  ? t('版本管理')
+                  : t('密钥管理')}
+          </h2>
           <div className="page-actions">
             <a className="btn ghost" href="/">
               {t('公开监控')}
@@ -1029,8 +1079,17 @@ export function AdminPage({
             </div>
             {error && <div className="banner error">{error}</div>}
           </section>
-        ) : (
+        ) : activeView === 'versions' ? (
           <VersionPanel onUnauthorized={clearSession} token={token} />
+        ) : (
+          <SshKeyPanel
+            error={sshKeysError}
+            keys={sshKeys}
+            loading={sshKeysLoading}
+            onReload={loadSshKeys}
+            onUnauthorized={clearSession}
+            token={token}
+          />
         )}
       </main>
 
@@ -1426,13 +1485,16 @@ export function AdminPage({
               )}
               {installAuth === 'key' && (
                 <label>
-                  {t('SSH 私钥路径（服务端/容器内）')}
-                  <input
+                  {t('服务器 SSH 私钥')}
+                  <select
                     required
-                    value={installKeyPath}
-                    onChange={(e) => setInstallKeyPath(e.target.value)}
-                    placeholder="/root/.ssh/id_rsa"
-                  />
+                    value={installKeyId}
+                    onChange={(e) => setInstallKeyId(e.target.value)}
+                  >
+                    <option value="">{t('请选择 SSH 私钥')}</option>
+                    {sshKeys.map((key) => <option key={key.id} value={key.id}>{key.name}</option>)}
+                  </select>
+                  {sshKeys.length === 0 && <span className="copy-help">{t('请先在密钥管理中上传私钥')}</span>}
                 </label>
               )}
               {installPhase === 'error' && !installError && <div className="banner error">{t('安装失败，请重试')}</div>}
