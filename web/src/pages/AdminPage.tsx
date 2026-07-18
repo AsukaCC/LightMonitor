@@ -39,6 +39,7 @@ import {
   fetchHosts,
   fetchReleaseCatalog,
   fetchSession,
+  deleteDownloadedRelease,
   login,
   logout,
   tokenStorageKey,
@@ -46,6 +47,7 @@ import {
 } from '../api'
 import { MetricBar } from '../components/MetricBar'
 import { LanguageSwitcher } from '../components/LanguageSwitcher'
+import { ProjectFooter } from '../components/ProjectFooter'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { translate, useI18n } from '../i18n'
 import type { Host, HostForm, MetricHistoryResponse, ReleaseCatalog, ServerEvent, ThemeMode } from '../types'
@@ -55,7 +57,7 @@ import {
   formatCpuDetail,
   formatDuration,
   formatLoad,
-  formatRelativeTime,
+  formatDateTime,
   formatUsageDetail,
   isStaleHost,
   percent,
@@ -790,7 +792,7 @@ export function AdminPage({
                               {host.is_system && <span className="tag">{t('宿主机')}</span>}
                             </h3>
                             <p className="dashboard-host-meta">
-                              {host.address} · {host.region || t('未设置地区')} · {formatRelativeTime(host.last_seen)}
+                              {host.address} · {host.region || t('未设置地区')} · {formatDateTime(host.last_seen)}
                             </p>
                           </div>
                         </div>
@@ -944,7 +946,7 @@ export function AdminPage({
                           </span>
                         </td>
                         <td data-label={t('最后上报')} title={host.last_seen ? new Date(host.last_seen).toLocaleString(language) : ''}>
-                          {formatRelativeTime(host.last_seen)}
+                          {formatDateTime(host.last_seen)}
                         </td>
                         <td data-label={t('数据更新')}>{formatUpdateInterval(host.update_interval_seconds)}</td>
                         <td data-label={t('状态')}>
@@ -1031,6 +1033,8 @@ export function AdminPage({
           <VersionPanel onUnauthorized={clearSession} token={token} />
         )}
       </main>
+
+      <ProjectFooter />
 
       {deleteFallback && (
         <div className="modal-backdrop">
@@ -1582,6 +1586,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
   const [catalog, setCatalog] = useState<ReleaseCatalog>()
   const [loading, setLoading] = useState(true)
   const [applyingVersion, setApplyingVersion] = useState<string>()
+  const [deletingVersion, setDeletingVersion] = useState<string>()
   const [restarting, setRestarting] = useState(false)
   const [versionError, setVersionError] = useState('')
 
@@ -1631,6 +1636,20 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
     }
   }
 
+  async function deleteVersion(version: string) {
+    if (!window.confirm(t('确认删除已下载版本 {version}？', { version }))) return
+    setDeletingVersion(version)
+    setVersionError('')
+    try {
+      await deleteDownloadedRelease(version, token, onUnauthorized)
+      await loadCatalog()
+    } catch (error) {
+      setVersionError(error instanceof Error ? error.message : t('版本删除失败'))
+    } finally {
+      setDeletingVersion(undefined)
+    }
+  }
+
   if (loading && !catalog) {
     return <div className="empty-state"><LoaderCircle className="spin" size={18} /> {t('加载中…')}</div>
   }
@@ -1666,6 +1685,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
       <div className="version-list">
         {catalog?.releases.map((release, index) => {
           const canApply = catalog.managed_updates && Boolean(release.asset_name) && !release.active && !restarting
+          const canDelete = catalog.managed_updates && release.installed && !release.active && !restarting && !applyingVersion && !deletingVersion
           const isNewer = index < catalog.releases.findIndex((item) => item.active)
           return (
             <article className={`version-row${release.active ? ' active' : ''}`} key={release.version}>
@@ -1686,9 +1706,21 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
                 <a className="icon-btn" href={release.html_url} rel="noreferrer" target="_blank" title={t('查看 GitHub Release')}>
                   <ExternalLink size={15} />
                 </a>
+                {release.installed && !release.active && (
+                  <button
+                    aria-label={t('删除已下载版本')}
+                    className="icon-btn danger"
+                    disabled={!canDelete}
+                    onClick={() => void deleteVersion(release.version)}
+                    title={t('删除已下载版本')}
+                    type="button"
+                  >
+                    {deletingVersion === release.version ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
+                  </button>
+                )}
                 <button
                   className="btn secondary"
-                  disabled={!canApply || Boolean(applyingVersion)}
+                  disabled={!canApply || Boolean(applyingVersion || deletingVersion)}
                   onClick={() => void switchVersion(release.version)}
                   type="button"
                 >
@@ -2082,7 +2114,7 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
             <DetailValue label={t('数据更新')} value={formatUpdateInterval(host.update_interval_seconds)} />
             <DetailValue label={t('SSH 密码')} value={host.has_ssh_password ? t('已保存') : t('未保存')} />
             <DetailValue label={t('SSH 身份文件')} value={host.has_ssh_identity ? t('已保存') : t('未保存')} />
-            <DetailValue label={t('最后上报')} value={host.last_seen ? new Date(host.last_seen).toLocaleString(language) : t('从未上报')} />
+            <DetailValue label={t('最后上报')} value={formatDateTime(host.last_seen)} />
             <DetailValue label={t('探针 ID')} value={host.agent_id || t('未注册')} mono />
             <DetailValue label={t('创建时间')} value={new Date(host.created_at).toLocaleString(language)} />
           </div>

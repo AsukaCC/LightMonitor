@@ -104,6 +104,46 @@ pub async fn install_and_activate(state: &AppState, requested: &str) -> anyhow::
     Ok(requested)
 }
 
+pub fn delete_downloaded_version(state: &AppState, requested: &str) -> anyhow::Result<bool> {
+    let requested = normalize_version(requested);
+    validate_version(&requested)?;
+
+    let active_file = state.config.data_dir.join("active-version");
+    let active_version = fs::read_to_string(&active_file)
+        .ok()
+        .map(|version| normalize_version(&version));
+    if requested == env!("CARGO_PKG_VERSION")
+        || active_version.as_deref() == Some(requested.as_str())
+    {
+        bail!("cannot delete the active version");
+    }
+
+    let destination = version_dir(state, &requested);
+    let metadata = match fs::symlink_metadata(&destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_dir() {
+        bail!("invalid downloaded version directory");
+    }
+
+    fs::remove_dir_all(&destination)
+        .with_context(|| format!("failed to delete downloaded version {requested}"))?;
+
+    let previous_file = state.config.data_dir.join("previous-version");
+    if fs::read_to_string(&previous_file)
+        .ok()
+        .map(|version| normalize_version(&version))
+        .as_deref()
+        == Some(requested.as_str())
+    {
+        fs::remove_file(previous_file)?;
+    }
+
+    Ok(true)
+}
+
 async fn fetch_releases(repo: &str) -> anyhow::Result<Vec<GithubRelease>> {
     if repo.split('/').count() != 2 || repo.chars().any(char::is_whitespace) {
         bail!("LIGHTMONITOR_GITHUB_REPO must use owner/repository format");

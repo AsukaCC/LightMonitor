@@ -114,8 +114,8 @@ git checkout main
 git pull origin main
 
 # 版本号与 Cargo.toml / web/package.json 保持一致更佳
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 然后在仓库 **Actions → Release** 查看工作流是否成功。
@@ -129,16 +129,16 @@ git push origin v1.0.1
 
 说明：
 
-- 仅 `git push` 到分支 **不会** 发版；必须推送 `v*` tag（如 `v1.0.1`）。
+- 仅 `git push` 到分支 **不会** 发版；必须推送 `v*` tag（如 `v1.0.3`）。
 - `workflow_dispatch` 可在 Actions 里手动触发工作流，但正式发布 Release / 推镜像仍以 **推送 tag** 为准。  
-- 镜像标签会去掉 tag 的 `v` 前缀：`v1.0.1` → 镜像 `1.0.1`。
+- 镜像标签会去掉 tag 的 `v` 前缀：`v1.0.3` → 镜像 `1.0.3`。
 
 ### 发版后验证
 
 ```bash
 docker pull ghcr.io/asukacc/lightmonitor:latest
 # 或指定版本
-docker pull ghcr.io/asukacc/lightmonitor:1.0.1
+docker pull ghcr.io/asukacc/lightmonitor:1.0.3
 ```
 
 管理台「版本管理」可从 GitHub Releases 选择升级 / 回退（需容器能访问 GitHub）。
