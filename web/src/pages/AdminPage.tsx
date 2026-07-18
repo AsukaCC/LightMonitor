@@ -39,6 +39,7 @@ import {
   fetchHosts,
   fetchReleaseCatalog,
   fetchSession,
+  deleteDownloadedRelease,
   login,
   logout,
   tokenStorageKey,
@@ -1585,6 +1586,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
   const [catalog, setCatalog] = useState<ReleaseCatalog>()
   const [loading, setLoading] = useState(true)
   const [applyingVersion, setApplyingVersion] = useState<string>()
+  const [deletingVersion, setDeletingVersion] = useState<string>()
   const [restarting, setRestarting] = useState(false)
   const [versionError, setVersionError] = useState('')
 
@@ -1634,6 +1636,20 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
     }
   }
 
+  async function deleteVersion(version: string) {
+    if (!window.confirm(t('确认删除已下载版本 {version}？', { version }))) return
+    setDeletingVersion(version)
+    setVersionError('')
+    try {
+      await deleteDownloadedRelease(version, token, onUnauthorized)
+      await loadCatalog()
+    } catch (error) {
+      setVersionError(error instanceof Error ? error.message : t('版本删除失败'))
+    } finally {
+      setDeletingVersion(undefined)
+    }
+  }
+
   if (loading && !catalog) {
     return <div className="empty-state"><LoaderCircle className="spin" size={18} /> {t('加载中…')}</div>
   }
@@ -1669,6 +1685,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
       <div className="version-list">
         {catalog?.releases.map((release, index) => {
           const canApply = catalog.managed_updates && Boolean(release.asset_name) && !release.active && !restarting
+          const canDelete = catalog.managed_updates && release.installed && !release.active && !restarting && !applyingVersion && !deletingVersion
           const isNewer = index < catalog.releases.findIndex((item) => item.active)
           return (
             <article className={`version-row${release.active ? ' active' : ''}`} key={release.version}>
@@ -1689,9 +1706,21 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
                 <a className="icon-btn" href={release.html_url} rel="noreferrer" target="_blank" title={t('查看 GitHub Release')}>
                   <ExternalLink size={15} />
                 </a>
+                {release.installed && !release.active && (
+                  <button
+                    aria-label={t('删除已下载版本')}
+                    className="icon-btn danger"
+                    disabled={!canDelete}
+                    onClick={() => void deleteVersion(release.version)}
+                    title={t('删除已下载版本')}
+                    type="button"
+                  >
+                    {deletingVersion === release.version ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
+                  </button>
+                )}
                 <button
                   className="btn secondary"
-                  disabled={!canApply || Boolean(applyingVersion)}
+                  disabled={!canApply || Boolean(applyingVersion || deletingVersion)}
                   onClick={() => void switchVersion(release.version)}
                   type="button"
                 >

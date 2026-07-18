@@ -73,6 +73,44 @@ pub async fn apply_app_release(
     ))
 }
 
+pub async fn delete_app_release(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(version): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !state.config.managed_updates {
+        return Err(ApiError::bad_request(
+            "managed updates are disabled for this deployment",
+        ));
+    }
+
+    let guard = state
+        .update_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| ApiError::conflict("another version change is in progress"))?;
+    let deleted = crate::updater::delete_downloaded_version(&state, &version).map_err(|error| {
+        let message = error.to_string();
+        if message.contains("invalid release version")
+            || message.contains("active version")
+            || message.contains("invalid downloaded version")
+        {
+            ApiError::bad_request(message)
+        } else {
+            ApiError::internal(message)
+        }
+    })?;
+    drop(guard);
+
+    if !deleted {
+        return Err(ApiError::not_found(format!(
+            "downloaded version {} was not found",
+            version.trim()
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Server-to-browser event stream. SSE keeps this channel one-way: the
 /// browser receives updates but cannot send messages over the stream.
 pub async fn events(

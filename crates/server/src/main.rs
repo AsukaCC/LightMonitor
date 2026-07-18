@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::state::AppState;
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -57,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/public/hosts", get(routes::list_public_hosts))
         .route("/system/releases", get(routes::list_app_releases))
         .route("/system/releases/apply", post(routes::apply_app_release))
+        .route(
+            "/system/releases/{version}",
+            delete(routes::delete_app_release),
+        )
         .route(
             "/hosts",
             get(routes::list_hosts)
