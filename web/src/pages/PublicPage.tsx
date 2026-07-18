@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchPublicHosts } from '../api'
 import { MetricBar } from '../components/MetricBar'
 import { LanguageSwitcher } from '../components/LanguageSwitcher'
+import { ProjectFooter } from '../components/ProjectFooter'
 import { useI18n } from '../i18n'
 import type { PublicHost, ThemeMode } from '../types'
 import { statusLabel } from '../types'
@@ -222,6 +223,8 @@ export function PublicPage({
           </article>
         ))}
       </section>
+
+      <ProjectFooter />
     </div>
   )
 }

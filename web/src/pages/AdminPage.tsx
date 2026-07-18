@@ -46,6 +46,7 @@ import {
 } from '../api'
 import { MetricBar } from '../components/MetricBar'
 import { LanguageSwitcher } from '../components/LanguageSwitcher'
+import { ProjectFooter } from '../components/ProjectFooter'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { translate, useI18n } from '../i18n'
 import type { Host, HostForm, MetricHistoryResponse, ReleaseCatalog, ServerEvent, ThemeMode } from '../types'
@@ -1031,6 +1032,8 @@ export function AdminPage({
           <VersionPanel onUnauthorized={clearSession} token={token} />
         )}
       </main>
+
+      <ProjectFooter />
 
       {deleteFallback && (
         <div className="modal-backdrop">
