@@ -69,7 +69,6 @@ export async function applyRelease(version: string, token: string, onUnauthorize
   if (!response.ok) throw new Error(await readError(response))
   return (await response.json()) as { version: string; restarting: boolean }
 }
-
 export async function deleteDownloadedRelease(version: string, token: string, onUnauthorized?: () => void) {
   const response = await authFetch(`/api/system/releases/${encodeURIComponent(version)}`, {
     method: 'DELETE',

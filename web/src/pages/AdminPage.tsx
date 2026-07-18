@@ -37,11 +37,11 @@ import * as d3 from 'd3'
 import {
   applyRelease,
   authFetch,
+  deleteDownloadedRelease,
   fetchHosts,
   fetchReleaseCatalog,
   fetchSshKeys,
   fetchSession,
-  deleteDownloadedRelease,
   login,
   logout,
   tokenStorageKey,
@@ -49,7 +49,6 @@ import {
 } from '../api'
 import { MetricBar } from '../components/MetricBar'
 import { LanguageSwitcher } from '../components/LanguageSwitcher'
-import { ProjectFooter } from '../components/ProjectFooter'
 import { SshKeyPanel } from '../components/SshKeyPanel'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { translate, useI18n } from '../i18n'
@@ -60,7 +59,7 @@ import {
   formatCpuDetail,
   formatDuration,
   formatLoad,
-  formatDateTime,
+  formatRelativeTime,
   formatUsageDetail,
   isStaleHost,
   percent,
@@ -842,7 +841,7 @@ export function AdminPage({
                               {host.is_system && <span className="tag">{t('宿主机')}</span>}
                             </h3>
                             <p className="dashboard-host-meta">
-                              {host.address} · {host.region || t('未设置地区')} · {formatDateTime(host.last_seen)}
+                              {host.address} · {host.region || t('未设置地区')} · {formatRelativeTime(host.last_seen)}
                             </p>
                           </div>
                         </div>
@@ -996,7 +995,7 @@ export function AdminPage({
                           </span>
                         </td>
                         <td data-label={t('最后上报')} title={host.last_seen ? new Date(host.last_seen).toLocaleString(language) : ''}>
-                          {formatDateTime(host.last_seen)}
+                          {formatRelativeTime(host.last_seen)}
                         </td>
                         <td data-label={t('数据更新')}>{formatUpdateInterval(host.update_interval_seconds)}</td>
                         <td data-label={t('状态')}>
@@ -1092,8 +1091,6 @@ export function AdminPage({
           />
         )}
       </main>
-
-      <ProjectFooter />
 
       {deleteFallback && (
         <div className="modal-backdrop">
@@ -2176,7 +2173,7 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
             <DetailValue label={t('数据更新')} value={formatUpdateInterval(host.update_interval_seconds)} />
             <DetailValue label={t('SSH 密码')} value={host.has_ssh_password ? t('已保存') : t('未保存')} />
             <DetailValue label={t('SSH 身份文件')} value={host.has_ssh_identity ? t('已保存') : t('未保存')} />
-            <DetailValue label={t('最后上报')} value={formatDateTime(host.last_seen)} />
+            <DetailValue label={t('最后上报')} value={host.last_seen ? new Date(host.last_seen).toLocaleString(language) : t('从未上报')} />
             <DetailValue label={t('探针 ID')} value={host.agent_id || t('未注册')} mono />
             <DetailValue label={t('创建时间')} value={new Date(host.created_at).toLocaleString(language)} />
           </div>
