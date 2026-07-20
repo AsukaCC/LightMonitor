@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "1.0.1"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "1.0.1"
+version = "1.0.4"
 dependencies = [
  "aes-gcm",
  "anyhow",

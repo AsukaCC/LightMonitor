@@ -34,12 +34,8 @@ struct GithubAsset {
 
 pub async fn release_catalog(state: &AppState) -> anyhow::Result<ReleaseCatalog> {
     let releases = fetch_releases(&state.config.github_repo).await?;
-    let bundled_version = env!("CARGO_PKG_VERSION").to_string();
-    let current = std::env::var("LIGHTMONITOR_RUNNING_VERSION")
-        .map(|version| normalize_version(&version))
-        .ok()
-        .filter(|version| !version.is_empty())
-        .unwrap_or_else(|| bundled_version.clone());
+    let bundled_version = bundled_version();
+    let current = current_running_version(&bundled_version);
     let expected_asset = platform_asset_name();
     let mut catalog_releases = Vec::new();
 
@@ -49,10 +45,11 @@ pub async fn release_catalog(state: &AppState) -> anyhow::Result<ReleaseCatalog>
             .and_then(|expected| release.assets.iter().find(|asset| asset.name == *expected));
         let version = normalize_version(&release.tag_name);
         let installed = valid_version_dir(&version_dir(state, &version));
+        let can_delete = can_delete_downloaded_version(state, &version);
         catalog_releases.push(AppRelease {
             installed,
-            // The launcher always uses the bundled binary for its default
-            // version, even when a same-version copy exists in the data volume.
+            // The launcher uses the bundled runtime for its default version,
+            // even when a same-version copy exists in the data volume.
             active: version == current && !(version == bundled_version && installed),
             version,
             name: release.name.unwrap_or(release.tag_name),
@@ -61,6 +58,7 @@ pub async fn release_catalog(state: &AppState) -> anyhow::Result<ReleaseCatalog>
             prerelease: release.prerelease,
             asset_name: asset.map(|asset| asset.name.clone()),
             asset_size: asset.map(|asset| asset.size),
+            can_delete,
         });
     }
 
@@ -104,9 +102,10 @@ pub async fn install_and_activate(state: &AppState, requested: &str) -> anyhow::
     // selected bundle so a previously installed copy cannot mask a republish.
     download_and_unpack(release, bundle, &destination).await?;
 
-    let current = env!("CARGO_PKG_VERSION");
+    let bundled_version = bundled_version();
+    let current = current_running_version(&bundled_version);
     if current != requested {
-        atomic_write(&state.config.data_dir.join("previous-version"), current)?;
+        atomic_write(&state.config.data_dir.join("previous-version"), &current)?;
     }
     atomic_write(&state.config.data_dir.join("active-version"), &requested)?;
     Ok(requested)
@@ -116,14 +115,6 @@ pub fn delete_downloaded_version(state: &AppState, requested: &str) -> anyhow::R
     let requested = normalize_version(requested);
     validate_version(&requested)?;
 
-    let active_file = state.config.data_dir.join("active-version");
-    let active_version = fs::read_to_string(&active_file)
-        .ok()
-        .map(|version| normalize_version(&version));
-    if active_version.as_deref() == Some(requested.as_str()) {
-        bail!("cannot delete the active version");
-    }
-
     let destination = version_dir(state, &requested);
     let metadata = match fs::symlink_metadata(&destination) {
         Ok(metadata) => metadata,
@@ -132,6 +123,9 @@ pub fn delete_downloaded_version(state: &AppState, requested: &str) -> anyhow::R
     };
     if !metadata.file_type().is_dir() {
         bail!("invalid downloaded version directory");
+    }
+    if !can_delete_downloaded_version(state, &requested) {
+        bail!("cannot delete the running version");
     }
 
     fs::remove_dir_all(&destination)
@@ -287,6 +281,67 @@ fn platform_asset_name() -> Option<String> {
     }
 }
 
+fn bundled_version() -> String {
+    std::env::var("LIGHTMONITOR_BUNDLED_VERSION")
+        .map(|version| normalize_version(&version))
+        .ok()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+fn current_running_version(bundled_version: &str) -> String {
+    running_version_from_env(
+        std::env::var("LIGHTMONITOR_RUNNING_VERSION").ok(),
+        bundled_version,
+    )
+}
+
+fn running_version_from_env(value: Option<String>, bundled_version: &str) -> String {
+    value
+        .map(|version| normalize_version(&version))
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| bundled_version.to_string())
+}
+
+fn can_delete_downloaded_version(state: &AppState, requested: &str) -> bool {
+    can_delete_downloaded_version_with_runtime_dir(
+        state,
+        requested,
+        current_runtime_dir().as_deref(),
+    )
+}
+
+fn can_delete_downloaded_version_with_runtime_dir(
+    state: &AppState,
+    requested: &str,
+    runtime_dir: Option<&Path>,
+) -> bool {
+    let destination = version_dir(state, requested);
+    if !valid_version_dir(&destination)
+        || runtime_dir.is_some_and(|path| same_existing_path(&destination, path))
+    {
+        return false;
+    }
+
+    let bundled_version = bundled_version();
+    let current = current_running_version(&bundled_version);
+    current != requested || requested == bundled_version || runtime_dir.is_some()
+}
+
+fn current_runtime_dir() -> Option<PathBuf> {
+    std::env::var("LIGHTMONITOR_RUNTIME_DIR")
+        .ok()
+        .map(|path| PathBuf::from(path.trim()))
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn normalize_version(version: &str) -> String {
     version.trim().trim_start_matches('v').to_string()
 }
@@ -354,6 +409,56 @@ mod tests {
         );
         assert_eq!(checksum_for(checksums, "two.tar.gz"), Some("b".repeat(64)));
         assert_eq!(checksum_for(checksums, "missing.tar.gz"), None);
+    }
+
+    #[test]
+    fn prefers_launcher_running_version_over_bundled_version() {
+        assert_eq!(
+            running_version_from_env(Some("v1.2.3\n".to_string()), "1.0.1"),
+            "1.2.3"
+        );
+        assert_eq!(
+            running_version_from_env(Some(" ".to_string()), "1.0.1"),
+            "1.0.1"
+        );
+        assert_eq!(running_version_from_env(None, "1.0.1"), "1.0.1");
+    }
+
+    #[test]
+    fn keeps_the_current_runtime_directory() {
+        let root =
+            std::env::temp_dir().join(format!("lightmonitor-current-runtime-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let versions_dir = data_dir.join("versions");
+        let version_dir = versions_dir.join("2.0.0");
+        fs::create_dir_all(version_dir.join("web")).unwrap();
+        fs::write(version_dir.join("lightmonitor-server"), b"server").unwrap();
+        fs::write(version_dir.join("web/index.html"), b"index").unwrap();
+        let db = Db::open(&data_dir.join("lightmonitor.db")).unwrap();
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            data_dir: data_dir.clone(),
+            web_dir: root.join("web"),
+            releases_dir: root.join("releases"),
+            versions_dir,
+            ssh_keys_dir: data_dir.join("ssh-keys"),
+            public_url: String::new(),
+            github_repo: "owner/repo".to_string(),
+            managed_updates: true,
+            admin_username: "admin".to_string(),
+            admin_password: "admin".to_string(),
+            offline_seconds: 30,
+            session_ttl_hours: 24,
+        };
+        let state = AppState::new(db, config);
+
+        assert!(!can_delete_downloaded_version_with_runtime_dir(
+            &state,
+            "2.0.0",
+            Some(&version_dir)
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

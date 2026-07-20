@@ -41,6 +41,8 @@ while true; do
 
   export LIGHTMONITOR_WEB_DIR="${runtime_dir}/web"
   export LIGHTMONITOR_RUNNING_VERSION="${selected_version}"
+  export LIGHTMONITOR_RUNTIME_DIR="${runtime_dir}"
+  export LIGHTMONITOR_BUNDLED_VERSION="${default_version}"
   "${runtime_dir}/lightmonitor-server" &
   server_pid=$!
   trap forward_signal TERM INT

@@ -328,6 +328,7 @@ pub struct AppRelease {
     pub active: bool,
     pub asset_name: Option<String>,
     pub asset_size: Option<u64>,
+    pub can_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
