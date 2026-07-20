@@ -61,6 +61,10 @@ pub struct SystemSample {
     pub load_average: [f64; 3],
     pub network_rx_bytes: u64,
     pub network_tx_bytes: u64,
+    #[serde(default)]
+    pub network_rx_rate: Option<f64>,
+    #[serde(default)]
+    pub network_tx_rate: Option<f64>,
     pub disks: Vec<DiskSample>,
     pub collected_at: DateTime<Utc>,
 }
@@ -74,6 +78,8 @@ pub struct MetricHistoryPoint {
     pub load_one: f64,
     pub network_rx_bytes: u64,
     pub network_tx_bytes: u64,
+    pub network_rx_rate: Option<f64>,
+    pub network_tx_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,6 +133,8 @@ pub struct PublicMetrics {
     pub disk_percent: f32,
     pub load_average: [f64; 3],
     pub uptime_seconds: u64,
+    pub network_rx_rate: f64,
+    pub network_tx_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +191,8 @@ impl Host {
                 disk_percent,
                 load_average: sample.load_average,
                 uptime_seconds: sample.uptime_seconds,
+                network_rx_rate: sample.network_rx_rate.unwrap_or(0.0),
+                network_tx_rate: sample.network_tx_rate.unwrap_or(0.0),
             }
         });
 

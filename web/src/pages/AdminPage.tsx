@@ -19,7 +19,6 @@ import {
   LoaderCircle,
   LogOut,
   MemoryStick,
-  Network,
   Plus,
   PackageSearch,
   RefreshCw,
@@ -28,6 +27,7 @@ import {
   Terminal,
   Trash2,
   TriangleAlert,
+  Upload,
   Wifi,
   X,
 } from 'lucide-react'
@@ -59,6 +59,7 @@ import {
   formatCpuDetail,
   formatDuration,
   formatLoad,
+  formatNetworkRate,
   formatRelativeTime,
   formatUsageDetail,
   isStaleHost,
@@ -333,14 +334,14 @@ export function AdminPage({
         const prev = existing.latest
         const curr = nextHost.latest
         const elapsed = (new Date(curr.collected_at).getTime() - new Date(prev.collected_at).getTime()) / 1000
-        if (elapsed > 0.5) {
+        if ((curr.network_rx_rate === undefined || curr.network_tx_rate === undefined) && elapsed > 0.5) {
           const rxDelta = curr.network_rx_bytes >= prev.network_rx_bytes ? curr.network_rx_bytes - prev.network_rx_bytes : 0
           const txDelta = curr.network_tx_bytes >= prev.network_tx_bytes ? curr.network_tx_bytes - prev.network_tx_bytes : 0
-          curr.network_rx_rate = rxDelta / elapsed
-          curr.network_tx_rate = txDelta / elapsed
-        } else {
-          curr.network_rx_rate = prev.network_rx_rate
-          curr.network_tx_rate = prev.network_tx_rate
+          curr.network_rx_rate ??= rxDelta / elapsed
+          curr.network_tx_rate ??= txDelta / elapsed
+        } else if (elapsed <= 0.5) {
+          curr.network_rx_rate ??= prev.network_rx_rate
+          curr.network_tx_rate ??= prev.network_tx_rate
         }
       }
       const exists = current.some((host) => host.id === nextHost.id)
@@ -1887,14 +1888,20 @@ function HostHistoryPanel({
       const elapsed = previousAt ? Math.max(1, (at.getTime() - previousAt.getTime()) / 1000) : 1
       const rxDelta = previous ? point.network_rx_bytes - previous.network_rx_bytes : 0
       const txDelta = previous ? point.network_tx_bytes - previous.network_tx_bytes : 0
+      const storedRxRate = point.network_rx_rate
+      const storedTxRate = point.network_tx_rate
       return {
         at,
         cpu: point.cpu_percent,
         memory: point.memory_percent,
         disk: point.disk_percent,
         load: point.load_one,
-        rxRate: Math.max(0, rxDelta) / elapsed / 1024,
-        txRate: Math.max(0, txDelta) / elapsed / 1024,
+        rxRate: typeof storedRxRate === 'number' && Number.isFinite(storedRxRate)
+          ? storedRxRate / 1024
+          : Math.max(0, rxDelta) / elapsed / 1024,
+        txRate: typeof storedTxRate === 'number' && Number.isFinite(storedTxRate)
+          ? storedTxRate / 1024
+          : Math.max(0, txDelta) / elapsed / 1024,
       }
     })
   }, [history])
@@ -2095,10 +2102,6 @@ function HostMetricSummary({ host }: { host: Host }) {
   const memoryPercent = percent(sample.memory_used_bytes, sample.memory_total_bytes)
   const disk = sample.disks[0]
   const diskPercent = disk ? percent(disk.total_bytes - disk.available_bytes, disk.total_bytes) : 0
-  const rxRate =
-    sample.network_rx_rate !== undefined ? ` (${formatBytes(sample.network_rx_rate)}/s)` : ''
-  const txRate =
-    sample.network_tx_rate !== undefined ? ` (${formatBytes(sample.network_tx_rate)}/s)` : ''
 
   return (
     <div className="dashboard-host-metrics">
@@ -2132,20 +2135,16 @@ function HostMetricSummary({ host }: { host: Host }) {
       <div className="dashboard-host-live">
         <div className="live-stat">
           <span className="live-stat-label">
-            <Network size={14} />
-            {t('接收')}
+            <Download size={14} />
+            {t('下行网速')}
           </span>
-          <strong className="live-stat-value">
-            {formatBytes(sample.network_rx_bytes)}
-            {rxRate}
-          </strong>
+          <strong className="live-stat-value">{formatNetworkRate(sample.network_rx_rate)}</strong>
+          <span className="live-stat-detail">{t('累计接收')} {formatBytes(sample.network_rx_bytes)}</span>
         </div>
         <div className="live-stat">
-          <span className="live-stat-label">{t('发送')}</span>
-          <strong className="live-stat-value">
-            {formatBytes(sample.network_tx_bytes)}
-            {txRate}
-          </strong>
+          <span className="live-stat-label"><Upload size={14} />{t('上行网速')}</span>
+          <strong className="live-stat-value">{formatNetworkRate(sample.network_tx_rate)}</strong>
+          <span className="live-stat-detail">{t('累计发送')} {formatBytes(sample.network_tx_bytes)}</span>
         </div>
         <div className="live-stat">
           <span className="live-stat-label">{t('负载')}</span>
@@ -2247,12 +2246,20 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
               <h4>{t('网络流量')}</h4>
               <div className="detail-grid">
                 <DetailValue
+                  label={t('下行网速')}
+                  value={formatNetworkRate(sample.network_rx_rate)}
+                />
+                <DetailValue
+                  label={t('上行网速')}
+                  value={formatNetworkRate(sample.network_tx_rate)}
+                />
+                <DetailValue
                   label={t('累计接收')}
-                  value={`${formatBytes(sample.network_rx_bytes)}${sample.network_rx_rate !== undefined ? ` (${formatBytes(sample.network_rx_rate)}/s)` : ''}`}
+                  value={formatBytes(sample.network_rx_bytes)}
                 />
                 <DetailValue
                   label={t('累计发送')}
-                  value={`${formatBytes(sample.network_tx_bytes)}${sample.network_tx_rate !== undefined ? ` (${formatBytes(sample.network_tx_rate)}/s)` : ''}`}
+                  value={formatBytes(sample.network_tx_bytes)}
                 />
               </div>
             </section>

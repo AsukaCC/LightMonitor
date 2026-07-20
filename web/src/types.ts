@@ -43,6 +43,8 @@ export type MetricHistoryPoint = {
   load_one: number
   network_rx_bytes: number
   network_tx_bytes: number
+  network_rx_rate?: number
+  network_tx_rate?: number
 }
 
 export type MetricHistoryResponse = {
@@ -89,6 +91,8 @@ export type PublicMetrics = {
   disk_percent: number
   load_average: [number, number, number]
   uptime_seconds: number
+  network_rx_rate: number
+  network_tx_rate: number
 }
 
 export type PublicHost = {

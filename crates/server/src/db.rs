@@ -85,6 +85,8 @@ impl Db {
                 load_one REAL NOT NULL,
                 network_rx_bytes INTEGER NOT NULL,
                 network_tx_bytes INTEGER NOT NULL,
+                network_rx_rate REAL,
+                network_tx_rate REAL,
                 FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE
             );
 
@@ -114,6 +116,14 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE hosts ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE metric_history ADD COLUMN network_rx_rate REAL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE metric_history ADD COLUMN network_tx_rate REAL",
             [],
         );
         let db = Self {
@@ -760,7 +770,7 @@ impl Db {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT collected_at, cpu_percent, memory_percent, disk_percent, load_one,
-                        network_rx_bytes, network_tx_bytes
+                        network_rx_bytes, network_tx_bytes, network_rx_rate, network_tx_rate
                  FROM metric_history
                  WHERE host_id = ?1 AND collected_at >= ?2
                  ORDER BY collected_at ASC",
@@ -776,6 +786,8 @@ impl Db {
                         load_one: row.get(4)?,
                         network_rx_bytes: row.get::<_, i64>(5)?.max(0) as u64,
                         network_tx_bytes: row.get::<_, i64>(6)?.max(0) as u64,
+                        network_rx_rate: row.get(7)?,
+                        network_tx_rate: row.get(8)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -835,7 +847,8 @@ fn store_metric_sample(
     host_id: Uuid,
     sample: &SystemSample,
 ) -> Result<Option<Host>> {
-    let latest_json = serde_json::to_string(sample)?;
+    let sample = normalize_network_rates(conn, host_id, sample)?;
+    let latest_json = serde_json::to_string(&sample)?;
     let now = Utc::now();
     let changed = conn.execute(
         "UPDATE hosts SET latest_json = ?1, last_seen = ?2, status = ?3, updated_at = ?4
@@ -868,8 +881,8 @@ fn store_metric_sample(
     conn.execute(
         "INSERT INTO metric_history (
             host_id, collected_at, cpu_percent, memory_percent, disk_percent, load_one,
-            network_rx_bytes, network_tx_bytes
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            network_rx_bytes, network_tx_bytes, network_rx_rate, network_tx_rate
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             host_id.to_string(),
             sample.collected_at.to_rfc3339(),
@@ -879,6 +892,8 @@ fn store_metric_sample(
             sample.load_average[0],
             sample.network_rx_bytes as i64,
             sample.network_tx_bytes as i64,
+            sample.network_rx_rate,
+            sample.network_tx_rate,
         ],
     )?;
     let retention = (now - Duration::days(7)).to_rfc3339();
@@ -887,6 +902,57 @@ fn store_metric_sample(
         params![retention],
     )?;
     get_host_conn(conn, host_id)
+}
+
+fn normalize_network_rates(
+    conn: &Connection,
+    host_id: Uuid,
+    sample: &SystemSample,
+) -> Result<SystemSample> {
+    let mut normalized = sample.clone();
+    normalized.network_rx_rate = valid_network_rate(normalized.network_rx_rate);
+    normalized.network_tx_rate = valid_network_rate(normalized.network_tx_rate);
+
+    if normalized.network_rx_rate.is_some() && normalized.network_tx_rate.is_some() {
+        return Ok(normalized);
+    }
+
+    let previous = conn
+        .query_row(
+            "SELECT latest_json FROM hosts WHERE id = ?1",
+            params![host_id.to_string()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .and_then(|json| serde_json::from_str::<SystemSample>(&json).ok());
+
+    if let Some(previous) = previous {
+        let elapsed =
+            (normalized.collected_at - previous.collected_at).num_milliseconds() as f64 / 1000.0;
+        if elapsed > 0.0 {
+            normalized.network_rx_rate.get_or_insert_with(|| {
+                normalized
+                    .network_rx_bytes
+                    .saturating_sub(previous.network_rx_bytes) as f64
+                    / elapsed
+            });
+            normalized.network_tx_rate.get_or_insert_with(|| {
+                normalized
+                    .network_tx_bytes
+                    .saturating_sub(previous.network_tx_bytes) as f64
+                    / elapsed
+            });
+        }
+    }
+
+    normalized.network_rx_rate.get_or_insert(0.0);
+    normalized.network_tx_rate.get_or_insert(0.0);
+    Ok(normalized)
+}
+
+fn valid_network_rate(rate: Option<f64>) -> Option<f64> {
+    rate.filter(|rate| rate.is_finite() && *rate >= 0.0)
 }
 
 fn get_host_conn(conn: &Connection, id: Uuid) -> Result<Option<Host>> {
@@ -1031,9 +1097,24 @@ fn downsample_history(
                 load_one: bucket.iter().map(|point| point.load_one).sum::<f64>() / count,
                 network_rx_bytes: last.network_rx_bytes,
                 network_tx_bytes: last.network_tx_bytes,
+                network_rx_rate: average_optional_rate(bucket, |point| point.network_rx_rate),
+                network_tx_rate: average_optional_rate(bucket, |point| point.network_tx_rate),
             }
         })
         .collect()
+}
+
+fn average_optional_rate(
+    points: &[MetricHistoryPoint],
+    rate: impl Fn(&MetricHistoryPoint) -> Option<f64>,
+) -> Option<f64> {
+    let (sum, count) = points
+        .iter()
+        .filter_map(rate)
+        .fold((0.0, 0usize), |(sum, count), value| {
+            (sum + value, count + 1)
+        });
+    (count > 0).then(|| sum / count as f64)
 }
 
 #[cfg(test)]
@@ -1084,6 +1165,8 @@ mod tests {
             load_average: [0.5, 0.25, 0.1],
             network_rx_bytes: 1024,
             network_tx_bytes: 512,
+            network_rx_rate: Some(2048.0),
+            network_tx_rate: Some(1024.0),
             disks: vec![DiskSample {
                 name: "test-disk".to_string(),
                 mount_point: "/".to_string(),
@@ -1094,7 +1177,10 @@ mod tests {
         };
         let monitored = db.apply_system_metrics(&sample).unwrap();
         assert_eq!(monitored.status, HostStatus::Online);
-        assert_eq!(monitored.latest.unwrap().cpu_percent, 12.5);
+        let latest = monitored.latest.unwrap();
+        assert_eq!(latest.cpu_percent, 12.5);
+        assert_eq!(latest.network_rx_rate, Some(2048.0));
+        assert_eq!(latest.network_tx_rate, Some(1024.0));
 
         let same_host = db
             .ensure_system_host_with_details("127.0.0.1", "本机")
@@ -1192,6 +1278,8 @@ mod tests {
                 load_average: [index as f64, 0.0, 0.0],
                 network_rx_bytes: index * 1024,
                 network_tx_bytes: index * 512,
+                network_rx_rate: None,
+                network_tx_rate: None,
                 disks: vec![DiskSample {
                     name: "test-disk".to_string(),
                     mount_point: "/".to_string(),
@@ -1209,6 +1297,10 @@ mod tests {
             .unwrap();
         assert!(history.len() <= 4);
         assert_eq!(history.last().unwrap().network_rx_bytes, 9 * 1024);
+        let latest_rx_rate = history.last().unwrap().network_rx_rate.unwrap();
+        let latest_tx_rate = history.last().unwrap().network_tx_rate.unwrap();
+        assert!((latest_rx_rate - 1024.0).abs() < 5.0);
+        assert!((latest_tx_rate - 512.0).abs() < 5.0);
         assert!(history.last().unwrap().memory_percent > 0.0);
 
         drop(db);

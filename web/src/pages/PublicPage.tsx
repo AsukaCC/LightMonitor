@@ -1,6 +1,7 @@
 import {
   Activity,
   Cpu,
+  Download,
   HardDrive,
   MapPin,
   MemoryStick,
@@ -8,6 +9,7 @@ import {
   RefreshCw,
   Server,
   Sun,
+  Upload,
   Wifi,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -17,7 +19,7 @@ import { LanguageSwitcher } from '../components/LanguageSwitcher'
 import { useI18n } from '../i18n'
 import type { PublicHost, ThemeMode } from '../types'
 import { statusLabel } from '../types'
-import { formatCpuDetail, formatDuration, formatLoad, formatUsageDetail } from '../utils'
+import { formatCpuDetail, formatDuration, formatLoad, formatNetworkRate, formatUsageDetail } from '../utils'
 
 type HostFilter = 'all' | 'online' | 'offline'
 
@@ -50,7 +52,7 @@ export function PublicPage({
 
   useEffect(() => {
     void load()
-    const timer = window.setInterval(() => void load(), 10000)
+    const timer = window.setInterval(() => void load(), 5000)
     return () => window.clearInterval(timer)
   }, [load])
 
@@ -197,6 +199,14 @@ export function PublicPage({
                   value={host.metrics.disk_percent}
                   tone="disk"
                 />
+                <div className="meta-line network-rate">
+                  <span><Download size={14} />{t('下行网速')}</span>
+                  <strong>{formatNetworkRate(host.metrics.network_rx_rate)}</strong>
+                </div>
+                <div className="meta-line network-rate">
+                  <span><Upload size={14} />{t('上行网速')}</span>
+                  <strong>{formatNetworkRate(host.metrics.network_tx_rate)}</strong>
+                </div>
                 <div className="meta-line">
                   <span>{t('负载')}</span>
                   <strong>{formatLoad(host.metrics.load_average)}</strong>

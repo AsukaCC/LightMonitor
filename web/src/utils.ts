@@ -28,6 +28,10 @@ export function formatBytes(value: number) {
   return `${(value / 1024 ** unitIndex).toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`
 }
 
+export function formatNetworkRate(value?: number) {
+  return `${formatBytes(value ?? 0)}/s`
+}
+
 export function formatResourceUsage(label: string, used: number, total: number) {
   return translate('{label} 已用 {used} / {total}', {
     label: translate(label), used: formatBytes(used), total: formatBytes(total),
