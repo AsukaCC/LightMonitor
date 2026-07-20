@@ -136,6 +136,7 @@ export type AppRelease = {
   active: boolean
   asset_name?: string
   asset_size?: number
+  can_delete: boolean
 }
 
 export type ReleaseCatalog = {

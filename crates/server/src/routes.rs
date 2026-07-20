@@ -94,6 +94,7 @@ pub async fn delete_app_release(
         let message = error.to_string();
         if message.contains("invalid release version")
             || message.contains("active version")
+            || message.contains("running version")
             || message.contains("invalid downloaded version")
         {
             ApiError::bad_request(message)

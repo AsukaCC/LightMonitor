@@ -1744,7 +1744,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
       <div className="version-list">
         {catalog?.releases.map((release, index) => {
           const canApply = catalog.managed_updates && Boolean(release.asset_name) && !release.active && !restarting
-          const canDelete = catalog.managed_updates && release.installed && !release.active && !restarting && !applyingVersion && !deletingVersion
+          const canDelete = catalog.managed_updates && release.can_delete && !restarting && !applyingVersion && !deletingVersion
           const isNewer = index < catalog.releases.findIndex((item) => item.active)
           return (
             <article className={`version-row${release.active ? ' active' : ''}`} key={release.version}>
@@ -1765,7 +1765,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
                 <a className="icon-btn" href={release.html_url} rel="noreferrer" target="_blank" title={t('查看 GitHub Release')}>
                   <ExternalLink size={15} />
                 </a>
-                {release.installed && !release.active && (
+                {catalog.managed_updates && release.can_delete && (
                   <button
                     aria-label={t('删除已下载版本')}
                     className="icon-btn danger"
