@@ -34,7 +34,7 @@ pub async fn resolve_local_region(address: &str) -> String {
     }
 }
 
-fn extract_host(address: &str) -> String {
+pub(crate) fn extract_host(address: &str) -> String {
     let trimmed = address.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -100,6 +100,8 @@ struct IpApiResponse {
     status: String,
     #[serde(default)]
     country: String,
+    #[serde(default, rename = "countryCode")]
+    country_code: String,
     #[serde(default, rename = "regionName")]
     region_name: String,
     #[serde(default)]
@@ -107,8 +109,9 @@ struct IpApiResponse {
 }
 
 async fn lookup_public_ip(ip: IpAddr) -> Option<String> {
-    let url =
-        format!("http://ip-api.com/json/{ip}?fields=status,country,regionName,city&lang=zh-CN");
+    let url = format!(
+        "http://ip-api.com/json/{ip}?fields=status,country,countryCode,regionName,city&lang=zh-CN"
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(4))
         .build()
@@ -121,11 +124,17 @@ async fn lookup_public_ip(ip: IpAddr) -> Option<String> {
     if body.status != "success" {
         return None;
     }
-    Some(format_region(&body.country, &body.region_name, &body.city))
+    Some(format_region(
+        &body.country,
+        &body.country_code,
+        &body.region_name,
+        &body.city,
+    ))
 }
 
 async fn lookup_requester_location() -> Option<String> {
-    let url = "http://ip-api.com/json/?fields=status,country,regionName,city&lang=zh-CN";
+    let url =
+        "http://ip-api.com/json/?fields=status,country,countryCode,regionName,city&lang=zh-CN";
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(4))
         .build()
@@ -135,13 +144,21 @@ async fn lookup_requester_location() -> Option<String> {
         return None;
     }
     let body: IpApiResponse = resp.json().await.ok()?;
-    (body.status == "success").then(|| format_region(&body.country, &body.region_name, &body.city))
+    (body.status == "success").then(|| {
+        format_region(
+            &body.country,
+            &body.country_code,
+            &body.region_name,
+            &body.city,
+        )
+    })
 }
 
-fn format_region(country: &str, region: &str, city: &str) -> String {
+fn format_region(country: &str, country_code: &str, region: &str, city: &str) -> String {
     let country = country.trim();
     let region = region.trim();
     let city = city.trim();
+    let flag = country_flag(country_code);
 
     // Prefer concise Chinese-friendly labels
     let mut parts: Vec<&str> = Vec::new();
@@ -158,7 +175,28 @@ fn format_region(country: &str, region: &str, city: &str) -> String {
         return String::new();
     }
     // e.g. 日本 · 东京都 · 东京  or  中国 · 香港
-    parts.join(" · ")
+    let label = parts.join(" · ");
+    if flag.is_empty() {
+        label
+    } else {
+        format!("{flag} {label}")
+    }
+}
+
+fn country_flag(country_code: &str) -> String {
+    let code = country_code.trim().to_ascii_uppercase();
+    if code.len() != 2 || !code.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return String::new();
+    }
+    code.bytes()
+        .filter_map(|byte| char::from_u32(0x1f1e6 + (byte - b'A') as u32))
+        .collect()
+}
+
+pub(crate) fn region_has_flag(region: &str) -> bool {
+    let mut characters = region.chars();
+    matches!(characters.next(), Some(value) if ('\u{1f1e6}'..='\u{1f1ff}').contains(&value))
+        && matches!(characters.next(), Some(value) if ('\u{1f1e6}'..='\u{1f1ff}').contains(&value))
 }
 
 #[cfg(test)]
@@ -173,5 +211,21 @@ mod tests {
     #[test]
     fn extract_host_plain() {
         assert_eq!(extract_host(" example.com "), "example.com");
+    }
+
+    #[test]
+    fn extracts_ipv6_addresses() {
+        assert_eq!(extract_host("[2001:db8::1]:443"), "2001:db8::1");
+        assert_eq!(extract_host("2001:db8::2"), "2001:db8::2");
+    }
+
+    #[test]
+    fn formats_country_flags() {
+        assert_eq!(
+            format_region("中国", "CN", "广东省", "深圳"),
+            "🇨🇳 中国 · 广东省 · 深圳"
+        );
+        assert!(region_has_flag("🇯🇵 日本 · 东京"));
+        assert!(!region_has_flag("日本 · 东京"));
     }
 }

@@ -2,12 +2,14 @@ import {
   Activity,
   Cpu,
   Download,
+  Globe2,
   HardDrive,
   MapPin,
   MemoryStick,
   Moon,
   RefreshCw,
   Server,
+  ShieldCheck,
   Sun,
   Upload,
   Wifi,
@@ -19,7 +21,17 @@ import { LanguageSwitcher } from '../components/LanguageSwitcher'
 import { useI18n } from '../i18n'
 import type { PublicHost, ThemeMode } from '../types'
 import { statusLabel } from '../types'
-import { formatCpuDetail, formatDuration, formatLoad, formatNetworkRate, formatUsageDetail } from '../utils'
+import {
+  daysUntil,
+  formatCpuDetail,
+  formatDate,
+  formatDuration,
+  formatLatency,
+  formatLoad,
+  formatNetworkRate,
+  formatPacketLoss,
+  formatUsageDetail,
+} from '../utils'
 
 type HostFilter = 'all' | 'online' | 'offline'
 
@@ -220,6 +232,40 @@ export function PublicPage({
               <div className="empty-inline">{t('暂无负载数据')}</div>
             )}
 
+            <div className="public-asset-status">
+              <div className="meta-line">
+                <span>{t('访问延迟')}</span>
+                <strong>{formatLatency(host.latency_ms)}</strong>
+              </div>
+              <div className="meta-line">
+                <span>{t('丢包率')}</span>
+                <strong>{formatPacketLoss(host.packet_loss_percent)}</strong>
+              </div>
+              <div className="meta-line">
+                <span>{t('服务器到期')}</span>
+                <strong>{formatPublicExpiry(host.expires_at, t)}</strong>
+              </div>
+              {(host.resolved_ipv4.length > 0 || host.resolved_ipv6.length > 0) && (
+                <div className="public-addresses">
+                  {host.resolved_ipv4.length > 0 && <span>IPv4 <code>{host.resolved_ipv4.join(', ')}</code></span>}
+                  {host.resolved_ipv6.length > 0 && <span>IPv6 <code>{host.resolved_ipv6.join(', ')}</code></span>}
+                </div>
+              )}
+              {host.domains.length > 0 && (
+                <div className="public-domains">
+                  {host.domains.map((domain) => (
+                    <div className="public-domain" key={domain.id}>
+                      <span><Globe2 size={13} />{domain.domain}</span>
+                      <strong className={`ssl-${domain.ssl_status}`}>
+                        <ShieldCheck size={13} />
+                        {domain.ssl_expires_at ? formatDate(domain.ssl_expires_at) : t('待检测')}
+                      </strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {host.tags.length > 0 && (
               <div className="tag-row">
                 {host.tags.map((tag) => (
@@ -234,4 +280,14 @@ export function PublicPage({
       </section>
     </div>
   )
+}
+
+function formatPublicExpiry(
+  iso: string | undefined,
+  t: (key: string, values?: Record<string, string | number>) => string,
+) {
+  const days = daysUntil(iso)
+  if (days === undefined) return '-'
+  if (days < 0) return t('已过期')
+  return t('剩余 {count} 天', { count: days })
 }

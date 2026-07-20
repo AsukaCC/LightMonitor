@@ -95,6 +95,27 @@ pub struct InstallLog {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostDomain {
+    pub id: Uuid,
+    pub domain: String,
+    pub port: u16,
+    pub resolved_ipv4: Vec<String>,
+    pub resolved_ipv6: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssl_expires_at: Option<DateTime<Utc>>,
+    pub ssl_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_loss_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Host {
     pub id: Uuid,
@@ -102,6 +123,19 @@ pub struct Host {
     pub name: String,
     pub address: String,
     pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub resolved_ipv4: Vec<String>,
+    pub resolved_ipv6: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_loss_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_probed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+    pub domains: Vec<HostDomain>,
     pub ssh_user: String,
     pub ssh_port: u16,
     pub update_interval_seconds: u64,
@@ -142,6 +176,15 @@ pub struct PublicHost {
     pub id: Uuid,
     pub name: String,
     pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub resolved_ipv4: Vec<String>,
+    pub resolved_ipv6: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_loss_percent: Option<f64>,
+    pub domains: Vec<HostDomain>,
     pub tags: Vec<String>,
     pub status: HostStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,6 +243,12 @@ impl Host {
             id: self.id,
             name: self.name.clone(),
             region: self.region.clone(),
+            expires_at: self.expires_at,
+            resolved_ipv4: self.resolved_ipv4.clone(),
+            resolved_ipv6: self.resolved_ipv6.clone(),
+            latency_ms: self.latency_ms,
+            packet_loss_percent: self.packet_loss_percent,
+            domains: self.domains.clone(),
             tags: self.tags.clone(),
             status: self.status.clone(),
             metrics,
@@ -214,6 +263,8 @@ pub struct CreateHostRequest {
     pub address: String,
     #[serde(default)]
     pub region: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     pub ssh_user: String,
     pub ssh_port: u16,
     /// Optional SSH password for remote install (stored server-side only).
@@ -229,6 +280,8 @@ pub struct UpdateHostRequest {
     pub address: String,
     #[serde(default)]
     pub region: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     pub ssh_user: String,
     pub ssh_port: u16,
     /// Empty = keep existing password; non-empty = replace; use clear_ssh_password to remove.
@@ -251,6 +304,17 @@ pub struct DeleteHostsRequest {
 pub struct UpdateHostIntervalRequest {
     pub ids: Vec<Uuid>,
     pub interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateHostDomainRequest {
+    pub domain: String,
+    #[serde(default = "default_https_port")]
+    pub port: u16,
+}
+
+fn default_https_port() -> u16 {
+    443
 }
 
 #[derive(Debug, Clone, Deserialize)]

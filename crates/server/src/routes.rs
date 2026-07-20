@@ -1,10 +1,11 @@
 use crate::auth::{ApiError, AuthUser, random_token};
 use crate::models::{
     AgentConfigResponse, AgentTokenResponse, ApplyReleaseRequest, ApplyReleaseResponse,
-    CreateHostRequest, DeleteHostsRequest, Host, HostStatus, InstallAgentRequest, InstallLog,
-    LoginRequest, LoginResponse, MetricHistoryQuery, MetricHistoryResponse, MetricReport,
-    RegisterAgentRequest, RegisterAgentResponse, ReleaseCatalog, ServerEvent, SessionResponse,
-    SshKey, UpdateHostIntervalRequest, UpdateHostRequest,
+    CreateHostDomainRequest, CreateHostRequest, DeleteHostsRequest, Host, HostStatus,
+    InstallAgentRequest, InstallLog, LoginRequest, LoginResponse, MetricHistoryQuery,
+    MetricHistoryResponse, MetricReport, RegisterAgentRequest, RegisterAgentResponse,
+    ReleaseCatalog, ServerEvent, SessionResponse, SshKey, UpdateHostIntervalRequest,
+    UpdateHostRequest,
 };
 use crate::state::AppState;
 use axum::Json;
@@ -366,11 +367,26 @@ pub async fn create_host(
     if body.region.is_empty() {
         body.region = crate::geo::resolve_region(&body.address).await;
     }
+    let address = body.address.clone();
     let agent_token = random_token();
-    let host = state
+    let mut host = state
         .db
         .create_host(body, agent_token)
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    if let Some(target) = crate::probe::domain_from_host_address(&address) {
+        host = state
+            .db
+            .add_host_domain(
+                host.id,
+                CreateHostDomainRequest {
+                    domain: target.domain,
+                    port: target.port,
+                },
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .unwrap_or(host);
+    }
+    queue_host_probe(state.clone(), host.clone());
     state.publish(ServerEvent::HostUpdated {
         host: Box::new(host.clone()),
     });
@@ -388,15 +404,102 @@ pub async fn update_host(
     if body.region.is_empty() {
         body.region = crate::geo::resolve_region(&body.address).await;
     }
-    let host = state
+    let address = body.address.clone();
+    let mut host = state
         .db
         .update_host(id, body)
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("host not found"))?;
+    if let Some(target) = crate::probe::domain_from_host_address(&address) {
+        host = state
+            .db
+            .add_host_domain(
+                host.id,
+                CreateHostDomainRequest {
+                    domain: target.domain,
+                    port: target.port,
+                },
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .unwrap_or(host);
+    }
+    queue_host_probe(state.clone(), host.clone());
     state.publish(ServerEvent::HostUpdated {
         host: Box::new(host.clone()),
     });
     Ok(Json(host))
+}
+
+pub async fn add_host_domain(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateHostDomainRequest>,
+) -> Result<Json<Host>, ApiError> {
+    let target = crate::probe::parse_domain_target(&body.domain, body.port)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let host = state
+        .db
+        .add_host_domain(
+            id,
+            CreateHostDomainRequest {
+                domain: target.domain,
+                port: target.port,
+            },
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("host not found"))?;
+    queue_host_probe(state.clone(), host.clone());
+    state.publish(ServerEvent::HostUpdated {
+        host: Box::new(host.clone()),
+    });
+    Ok(Json(host))
+}
+
+pub async fn delete_host_domain(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path((id, domain_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Host>, ApiError> {
+    let host = state
+        .db
+        .delete_host_domain(id, domain_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("domain not found"))?;
+    state.publish(ServerEvent::HostUpdated {
+        host: Box::new(host.clone()),
+    });
+    Ok(Json(host))
+}
+
+pub async fn probe_host_now(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Host>, ApiError> {
+    let host = state
+        .db
+        .get_host(id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("host not found"))?;
+    let host = crate::probe::refresh_host(&state, &host)
+        .await
+        .map_err(|error| ApiError::bad_gateway(error.to_string()))?;
+    state.publish(ServerEvent::HostUpdated {
+        host: Box::new(host.clone()),
+    });
+    Ok(Json(host))
+}
+
+fn queue_host_probe(state: AppState, host: Host) {
+    tokio::spawn(async move {
+        match crate::probe::refresh_host(&state, &host).await {
+            Ok(host) => state.publish(ServerEvent::HostUpdated {
+                host: Box::new(host),
+            }),
+            Err(error) => tracing::warn!("host probe failed: {error}"),
+        }
+    });
 }
 
 pub async fn delete_hosts(

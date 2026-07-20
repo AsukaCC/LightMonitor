@@ -50,6 +50,45 @@ export async function fetchHosts(token: string, onUnauthorized?: () => void) {
   return (await response.json()) as Host[]
 }
 
+export async function addHostDomain(
+  hostId: string,
+  domain: string,
+  token: string,
+  onUnauthorized?: () => void,
+) {
+  const response = await authFetch(`/api/hosts/${encodeURIComponent(hostId)}/domains`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain }),
+  }, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as Host
+}
+
+export async function deleteHostDomain(
+  hostId: string,
+  domainId: string,
+  token: string,
+  onUnauthorized?: () => void,
+) {
+  const response = await authFetch(
+    `/api/hosts/${encodeURIComponent(hostId)}/domains/${encodeURIComponent(domainId)}`,
+    { method: 'DELETE' },
+    token,
+    onUnauthorized,
+  )
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as Host
+}
+
+export async function probeHost(hostId: string, token: string, onUnauthorized?: () => void) {
+  const response = await authFetch(`/api/hosts/${encodeURIComponent(hostId)}/probe`, {
+    method: 'POST',
+  }, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as Host
+}
+
 export async function logout(token: string) {
   await authFetch('/api/auth/logout', { method: 'POST' }, token).catch(() => undefined)
 }

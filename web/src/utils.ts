@@ -32,6 +32,30 @@ export function formatNetworkRate(value?: number) {
   return `${formatBytes(value ?? 0)}/s`
 }
 
+export function formatLatency(value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return '-'
+  return `${value.toFixed(value < 10 ? 1 : 0)} ms`
+}
+
+export function formatPacketLoss(value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return '-'
+  return `${value.toFixed(value > 0 && value < 1 ? 1 : 0)}%`
+}
+
+export function formatDate(iso?: string) {
+  if (!iso) return '-'
+  const value = new Date(iso)
+  if (Number.isNaN(value.getTime())) return '-'
+  return value.toLocaleDateString(currentLocale())
+}
+
+export function daysUntil(iso?: string) {
+  if (!iso) return undefined
+  const timestamp = new Date(iso).getTime()
+  if (!Number.isFinite(timestamp)) return undefined
+  return Math.ceil((timestamp - Date.now()) / 86400000)
+}
+
 export function formatResourceUsage(label: string, used: number, total: number) {
   return translate('{label} 已用 {used} / {total}', {
     label: translate(label), used: formatBytes(used), total: formatBytes(total),
