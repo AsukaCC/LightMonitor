@@ -83,6 +83,9 @@ export type Host = {
   domains: HostDomain[]
   ssh_user: string
   ssh_port: number
+  ssh_auth_type: 'password' | 'key'
+  ssh_key_id?: string
+  ssh_key_name?: string
   update_interval_seconds: number
   has_ssh_password: boolean
   has_ssh_identity: boolean
@@ -101,6 +104,8 @@ export type SshKey = {
   size_bytes: number
   updated_at: string
   in_use: boolean
+  host_ids: string[]
+  host_names: string[]
 }
 
 export type PublicMetrics = {
@@ -144,6 +149,8 @@ export type HostForm = {
   address: string
   ssh_user: string
   ssh_port: string
+  ssh_auth_type: 'password' | 'key'
+  ssh_key_id: string
   ssh_password: string
   clear_ssh_password: boolean
   expires_at: string

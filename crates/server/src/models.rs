@@ -95,6 +95,30 @@ pub struct InstallLog {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthType {
+    #[default]
+    Password,
+    Key,
+}
+
+impl SshAuthType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::Key => "key",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "key" => Self::Key,
+            _ => Self::Password,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostDomain {
     pub id: Uuid,
@@ -138,6 +162,11 @@ pub struct Host {
     pub domains: Vec<HostDomain>,
     pub ssh_user: String,
     pub ssh_port: u16,
+    pub ssh_auth_type: SshAuthType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_name: Option<String>,
     pub update_interval_seconds: u64,
     /// Whether an SSH password is stored (password itself is never returned).
     pub has_ssh_password: bool,
@@ -267,6 +296,10 @@ pub struct CreateHostRequest {
     pub expires_at: Option<DateTime<Utc>>,
     pub ssh_user: String,
     pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_auth_type: SshAuthType,
+    #[serde(default)]
+    pub ssh_key_id: Option<Uuid>,
     /// Optional SSH password for remote install (stored server-side only).
     #[serde(default)]
     pub ssh_password: String,
@@ -284,6 +317,10 @@ pub struct UpdateHostRequest {
     pub expires_at: Option<DateTime<Utc>>,
     pub ssh_user: String,
     pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_auth_type: SshAuthType,
+    #[serde(default)]
+    pub ssh_key_id: Option<Uuid>,
     /// Empty = keep existing password; non-empty = replace; use clear_ssh_password to remove.
     #[serde(default)]
     pub ssh_password: String,
@@ -389,6 +426,14 @@ pub struct SshKey {
     pub size_bytes: u64,
     pub updated_at: DateTime<Utc>,
     pub in_use: bool,
+    pub host_ids: Vec<Uuid>,
+    pub host_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssignSshKeyHostsRequest {
+    #[serde(default)]
+    pub host_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]

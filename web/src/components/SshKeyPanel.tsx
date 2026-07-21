@@ -1,27 +1,31 @@
-import { LoaderCircle, RefreshCw, Trash2, Upload } from 'lucide-react'
+import { Link2, LoaderCircle, RefreshCw, Save, Trash2, Upload, X } from 'lucide-react'
 import { useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { deleteSshKey, updateSshKey, uploadSshKey } from '../api'
+import { assignSshKeyHosts, deleteSshKey, updateSshKey, uploadSshKey } from '../api'
 import { useI18n } from '../i18n'
-import type { SshKey } from '../types'
+import type { Host, SshKey } from '../types'
 import { formatBytes } from '../utils'
 
 type Props = {
   keys: SshKey[]
+  hosts: Host[]
   loading: boolean
   error: string
   token: string
   onUnauthorized: () => void
   onReload: () => Promise<void>
+  onHostsReload: () => Promise<void>
 }
 
-export function SshKeyPanel({ keys, loading, error, token, onUnauthorized, onReload }: Props) {
+export function SshKeyPanel({ keys, hosts, loading, error, token, onUnauthorized, onReload, onHostsReload }: Props) {
   const { language, t } = useI18n()
   const [name, setName] = useState('')
   const [file, setFile] = useState<File>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [replaceId, setReplaceId] = useState<string>()
+  const [bindingKeyId, setBindingKeyId] = useState<string>()
+  const [bindingHostIds, setBindingHostIds] = useState<string[]>([])
   const replaceInput = useRef<HTMLInputElement>(null)
 
   async function submitUpload(event: FormEvent<HTMLFormElement>) {
@@ -77,6 +81,28 @@ export function SshKeyPanel({ keys, loading, error, token, onUnauthorized, onRel
     }
   }
 
+  function editBindings(key: SshKey) {
+    setBindingKeyId(key.id)
+    setBindingHostIds(key.host_ids ?? [])
+    setMessage('')
+  }
+
+  async function saveBindings(key: SshKey) {
+    setBusy(true)
+    setMessage('')
+    try {
+      await assignSshKeyHosts(key.id, bindingHostIds, token, onUnauthorized)
+      await Promise.all([onReload(), onHostsReload()])
+      setBindingKeyId(undefined)
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : t('主机关联保存失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const assignableHosts = hosts.filter((host) => !host.is_system)
+
   return (
     <section className="panel ssh-key-panel">
       <div className="section-head">
@@ -116,29 +142,73 @@ export function SshKeyPanel({ keys, loading, error, token, onUnauthorized, onRel
         {loading && keys.length === 0 && <div className="empty-state"><LoaderCircle className="spin" size={18} /> {t('加载中…')}</div>}
         {keys.map((key) => (
           <article className="ssh-key-row" key={key.id}>
-            <div className="ssh-key-info">
-              <strong>{key.name}</strong>
-              <span className="muted small">
-                {formatBytes(key.size_bytes)} · {new Date(key.updated_at).toLocaleString(language)}
-                {key.in_use ? ` · ${t('正在使用')}` : ''}
-              </span>
+            <div className="ssh-key-row-main">
+              <div className="ssh-key-info">
+                <strong>{key.name}</strong>
+                <span className="muted small">
+                  {formatBytes(key.size_bytes)} · {new Date(key.updated_at).toLocaleString(language)}
+                </span>
+                <span className="muted small">
+                  {(key.host_names ?? []).length > 0
+                    ? t('已关联主机：{names}', { names: key.host_names.join(', ') })
+                    : t('未关联主机')}
+                </span>
+              </div>
+              <div className="ssh-key-actions">
+                <button className="btn secondary" disabled={busy} onClick={() => editBindings(key)} type="button">
+                  <Link2 size={15} /> {t('关联主机')}
+                </button>
+                <label className="btn secondary file-picker">
+                  {replaceId === key.id ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}
+                  {t('更新')}
+                  <input
+                    ref={replaceId === key.id ? replaceInput : undefined}
+                    accept=".pem,.key,.pub,application/octet-stream,text/plain"
+                    disabled={busy}
+                    type="file"
+                    onChange={(event) => void replaceKey(key.id, event.target.files?.[0])}
+                  />
+                </label>
+                <button className="icon-btn danger" disabled={busy || key.in_use} onClick={() => void removeKey(key)} title={key.in_use ? t('密钥正在使用，不能删除') : t('删除')} type="button">
+                  <Trash2 size={15} />
+                </button>
+              </div>
             </div>
-            <div className="ssh-key-actions">
-              <label className="btn secondary file-picker">
-                {replaceId === key.id ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}
-                {t('更新')}
-                <input
-                  ref={replaceId === key.id ? replaceInput : undefined}
-                  accept=".pem,.key,.pub,application/octet-stream,text/plain"
-                  disabled={busy}
-                  type="file"
-                  onChange={(event) => void replaceKey(key.id, event.target.files?.[0])}
-                />
-              </label>
-              <button className="icon-btn danger" disabled={busy || key.in_use} onClick={() => void removeKey(key)} title={key.in_use ? t('密钥正在使用，不能删除') : t('删除')} type="button">
-                <Trash2 size={15} />
-              </button>
-            </div>
+            {bindingKeyId === key.id && (
+              <div className="ssh-key-bindings">
+                <div className="ssh-key-binding-head">
+                  <strong>{t('选择使用此密钥的主机')}</strong>
+                  <button className="icon-btn" disabled={busy} onClick={() => setBindingKeyId(undefined)} title={t('关闭')} type="button">
+                    <X size={15} />
+                  </button>
+                </div>
+                <div className="ssh-key-host-list">
+                  {assignableHosts.map((host) => (
+                    <label className="checkbox-row" key={host.id}>
+                      <input
+                        checked={bindingHostIds.includes(host.id)}
+                        disabled={busy}
+                        onChange={(event) => setBindingHostIds((current) => (
+                          event.target.checked
+                            ? [...current, host.id]
+                            : current.filter((id) => id !== host.id)
+                        ))}
+                        type="checkbox"
+                      />
+                      <span>{host.name}</span>
+                      <span className="muted small mono">{host.address}</span>
+                    </label>
+                  ))}
+                  {assignableHosts.length === 0 && <span className="muted small">{t('暂无可关联主机')}</span>}
+                </div>
+                <div className="ssh-key-binding-actions">
+                  <button className="btn primary" disabled={busy} onClick={() => void saveBindings(key)} type="button">
+                    {busy ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
+                    {t('保存关联')}
+                  </button>
+                </div>
+              </div>
+            )}
           </article>
         ))}
         {!loading && keys.length === 0 && <div className="empty-inline">{t('暂无已上传的 SSH 密钥')}</div>}

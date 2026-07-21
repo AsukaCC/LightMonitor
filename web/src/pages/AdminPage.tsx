@@ -81,7 +81,6 @@ type ActiveView = 'dashboard' | 'hosts' | 'versions' | 'keys'
 type HostModalMode = 'create' | 'edit'
 type HostFilter = 'all' | 'online' | 'offline' | 'never' | 'installing'
 type InstallPhase = 'idle' | 'installing' | 'success' | 'error'
-type InstallAuth = 'saved' | 'identity' | 'password' | 'key'
 type HistoryRange = '1h' | '4h' | '6h' | '12h' | '1d'
 type HistoryView = 'resources' | 'network' | 'load'
 type DeleteFallback = { ids: string[]; message: string }
@@ -91,6 +90,8 @@ const initialForm: HostForm = {
   address: '',
   ssh_user: '',
   ssh_port: '22',
+  ssh_auth_type: 'password',
+  ssh_key_id: '',
   ssh_password: '',
   clear_ssh_password: false,
   expires_at: '',
@@ -131,9 +132,6 @@ export function AdminPage({
   const [copiedItem, setCopiedItem] = useState<string>()
   const [hostPage, setHostPage] = useState(1)
   const [form, setForm] = useState<HostForm>(initialForm)
-  const [installKeyId, setInstallKeyId] = useState('')
-  const [installPassword, setInstallPassword] = useState('')
-  const [installAuth, setInstallAuth] = useState<InstallAuth>('password')
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginPasswordVisible, setLoginPasswordVisible] = useState(false)
   const [sshKeys, setSshKeys] = useState<SshKey[]>([])
@@ -382,6 +380,8 @@ export function AdminPage({
       address: host.address,
       ssh_user: host.ssh_user,
       ssh_port: String(host.ssh_port),
+      ssh_auth_type: host.ssh_auth_type,
+      ssh_key_id: host.ssh_key_id ?? '',
       ssh_password: '',
       clear_ssh_password: false,
       expires_at: host.expires_at?.slice(0, 10) ?? '',
@@ -418,9 +418,6 @@ export function AdminPage({
   function openInstallModal(host: Host) {
     if (host.is_system) return
     setInstallHostId(host.id)
-    setInstallAuth(host.has_ssh_identity ? 'identity' : host.has_ssh_password ? 'saved' : 'password')
-    setInstallPassword('')
-    setInstallKeyId(sshKeys[0]?.id ?? '')
     setInstallPhase(host.status === 'installing' ? 'installing' : 'idle')
     setInstallError('')
     setManualInstallOpen(false)
@@ -433,8 +430,6 @@ export function AdminPage({
   function closeInstallModal() {
     if (installPhase === 'installing') return
     setInstallHostId(undefined)
-    setInstallPassword('')
-    setInstallKeyId('')
     setTokenInfo(undefined)
     setManualInstallOpen(false)
     setInstallError('')
@@ -493,7 +488,9 @@ export function AdminPage({
             region: '',
             ssh_user: form.ssh_user.trim(),
             ssh_port: Number(form.ssh_port || 22),
-            ssh_password: form.ssh_password,
+            ssh_auth_type: form.ssh_auth_type,
+            ssh_key_id: form.ssh_auth_type === 'key' ? form.ssh_key_id : null,
+            ssh_password: form.ssh_auth_type === 'password' ? form.ssh_password : '',
             clear_ssh_password: form.clear_ssh_password,
             expires_at: form.expires_at ? `${form.expires_at}T23:59:59Z` : null,
             tags: form.tags
@@ -556,23 +553,12 @@ export function AdminPage({
     setInstallPhase('installing')
     setInstallError('')
     try {
-      if (installAuth === 'password' && !installPassword.trim()) {
-        throw new Error(t('请填写 SSH 密码'))
-      }
-      if (installAuth === 'key' && !installKeyId) {
-        throw new Error(t('请选择 SSH 私钥'))
-      }
       const response = await authFetch(
         `/api/hosts/${installHostId}/install-agent`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ssh_key_path: '',
-            ssh_key_id: installAuth === 'key' ? installKeyId : undefined,
-            ssh_password: installAuth === 'password' ? installPassword : '',
-            use_saved_identity: installAuth === 'identity',
-          }),
+          body: JSON.stringify({}),
         },
         token,
         clearSession,
@@ -1110,8 +1096,10 @@ export function AdminPage({
         ) : (
           <SshKeyPanel
             error={sshKeysError}
+            hosts={hosts}
             keys={sshKeys}
             loading={sshKeysLoading}
+            onHostsReload={loadHosts}
             onReload={loadSshKeys}
             onUnauthorized={clearSession}
             token={token}
@@ -1362,23 +1350,63 @@ export function AdminPage({
                     onChange={(e) => setForm((current) => ({ ...current, expires_at: e.target.value }))}
                   />
                 </label>
-                <label className="wide">
-                  {t('SSH 密码（可选）')}
-                  <input
-                    autoComplete="new-password"
-                    type="password"
-                    placeholder={
-                      hostModalMode === 'edit'
-                        ? t('留空保持不变；填写则更新')
-                        : t('用于远程安装探针（可选，可稍后填写）')
-                    }
-                    value={form.ssh_password}
-                    onChange={(e) =>
-                      setForm((current) => ({ ...current, ssh_password: e.target.value, clear_ssh_password: false }))
-                    }
-                  />
-                </label>
-                {hostModalMode === 'edit' && (
+                <div className="wide auth-type-field">
+                  <span>{t('连接方式')}</span>
+                  <div className="filter-tabs auth-type-tabs" role="group" aria-label={t('连接方式')}>
+                    <button
+                      className={form.ssh_auth_type === 'password' ? 'active' : ''}
+                      onClick={() => setForm((current) => ({ ...current, ssh_auth_type: 'password', ssh_key_id: '' }))}
+                      type="button"
+                    >
+                      {t('账户密码')}
+                    </button>
+                    <button
+                      className={form.ssh_auth_type === 'key' ? 'active' : ''}
+                      onClick={() => setForm((current) => ({
+                        ...current,
+                        ssh_auth_type: 'key',
+                        ssh_key_id: current.ssh_key_id || sshKeys[0]?.id || '',
+                        ssh_password: '',
+                        clear_ssh_password: false,
+                      }))}
+                      type="button"
+                    >
+                      {t('SSH 密钥')}
+                    </button>
+                  </div>
+                </div>
+                {form.ssh_auth_type === 'password' ? (
+                  <label className="wide">
+                    {t('SSH 密码（可选）')}
+                    <input
+                      autoComplete="new-password"
+                      type="password"
+                      placeholder={
+                        hostModalMode === 'edit'
+                          ? t('留空保持不变；填写则更新')
+                          : t('用于远程安装探针（可选，可稍后填写）')
+                      }
+                      value={form.ssh_password}
+                      onChange={(e) =>
+                        setForm((current) => ({ ...current, ssh_password: e.target.value, clear_ssh_password: false }))
+                      }
+                    />
+                  </label>
+                ) : (
+                  <label className="wide">
+                    {t('SSH 密钥')}
+                    <select
+                      required
+                      value={form.ssh_key_id}
+                      onChange={(e) => setForm((current) => ({ ...current, ssh_key_id: e.target.value }))}
+                    >
+                      <option value="">{t('请选择用于此主机的密钥')}</option>
+                      {sshKeys.map((key) => <option key={key.id} value={key.id}>{key.name}</option>)}
+                    </select>
+                    {sshKeys.length === 0 && <span className="copy-help">{t('请先在密钥管理中上传私钥')}</span>}
+                  </label>
+                )}
+                {hostModalMode === 'edit' && form.ssh_auth_type === 'password' && (
                   <label className="wide checkbox-row">
                     <input
                       checked={form.clear_ssh_password}
@@ -1467,77 +1495,28 @@ export function AdminPage({
                 </div>
               ) : null}
 
-              <div className="filter-tabs">
-                {installHost?.has_ssh_password && (
-                  <button
-                    className={installAuth === 'saved' ? 'active' : ''}
-                    disabled={installPhase === 'installing'}
-                    onClick={() => setInstallAuth('saved')}
-                    type="button"
-                  >
-                    {t('使用已保存密码')}
-                  </button>
+              <div className="install-auth-summary">
+                <div>
+                  <span className="muted small">{t('连接方式')}</span>
+                  <strong>{installHost?.ssh_auth_type === 'key' ? t('SSH 密钥') : t('账户密码')}</strong>
+                </div>
+                <div>
+                  <span className="muted small">{t('SSH 账户')}</span>
+                  <strong className="mono">{installHost?.ssh_user || t('未设置')}</strong>
+                </div>
+                {installHost?.ssh_auth_type === 'key' && (
+                  <div>
+                    <span className="muted small">{t('SSH 密钥')}</span>
+                    <strong>{installHost.ssh_key_name || t('未设置')}</strong>
+                  </div>
                 )}
-                {installHost?.has_ssh_identity && (
-                  <button
-                    className={installAuth === 'identity' ? 'active' : ''}
-                    disabled={installPhase === 'installing'}
-                    onClick={() => setInstallAuth('identity')}
-                    type="button"
-                  >
-                    {t('使用已保存身份文件')}
-                  </button>
-                )}
-                <button
-                  className={installAuth === 'password' ? 'active' : ''}
-                  disabled={installPhase === 'installing'}
-                  onClick={() => setInstallAuth('password')}
-                  type="button"
-                >
-                  {t('临时密码')}
-                </button>
-                <button
-                  className={installAuth === 'key' ? 'active' : ''}
-                  disabled={installPhase === 'installing'}
-                  onClick={() => setInstallAuth('key')}
-                  type="button"
-                >
-                  {t('密钥登录')}
-                </button>
               </div>
-              {installAuth === 'saved' && (
-                <p className="muted small">{t('将使用该主机已保存的 SSH 密码安装探针。')}</p>
-              )}
-              {installAuth === 'identity' && (
-                <p className="muted small">{t('将使用该主机已保存的 SSH 身份文件安装探针。')}</p>
-              )}
-              {installAuth === 'password' && (
-                <label>
-                  {t('SSH 密码')}
-                  <input
-                    autoComplete="new-password"
-                    disabled={installPhase === 'installing'}
-                    required
-                    type="password"
-                    value={installPassword}
-                    onChange={(e) => setInstallPassword(e.target.value)}
-                    placeholder={t('目标机 root/用户 登录密码')}
-                  />
-                </label>
-              )}
-              {installAuth === 'key' && (
-                <label>
-                  {t('服务器 SSH 私钥')}
-                  <select
-                    required
-                    value={installKeyId}
-                    onChange={(e) => setInstallKeyId(e.target.value)}
-                  >
-                    <option value="">{t('请选择 SSH 私钥')}</option>
-                    {sshKeys.map((key) => <option key={key.id} value={key.id}>{key.name}</option>)}
-                  </select>
-                  {sshKeys.length === 0 && <span className="copy-help">{t('请先在密钥管理中上传私钥')}</span>}
-                </label>
+              {installHost && (
+                (installHost.ssh_auth_type === 'password' && !installHost.has_ssh_password)
+                || (installHost.ssh_auth_type === 'key' && !installHost.has_ssh_identity)
+                || !installHost.ssh_user
+              ) && (
+                <div className="banner error">{t('当前主机缺少可用的 SSH 登录配置，请先编辑主机。')}</div>
               )}
               {installPhase === 'error' && !installError && <div className="banner error">{t('安装失败，请重试')}</div>}
 
@@ -1603,7 +1582,16 @@ export function AdminPage({
                 {installPhase === 'success' ? t('完成') : t('取消')}
               </button>
               {installPhase !== 'success' && (
-                <button className="btn primary" disabled={installPhase === 'installing'} type="submit">
+                <button
+                  className="btn primary"
+                  disabled={
+                    installPhase === 'installing'
+                    || !installHost?.ssh_user
+                    || (installHost.ssh_auth_type === 'password' && !installHost.has_ssh_password)
+                    || (installHost.ssh_auth_type === 'key' && !installHost.has_ssh_identity)
+                  }
+                  type="submit"
+                >
                   {installPhase === 'installing' && <LoaderCircle className="spin" size={15} />}
                   {installPhase === 'installing' ? t('安装中') : installPhase === 'error' ? t('重新安装') : t('开始安装')}
                 </button>
@@ -2235,8 +2223,11 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
             <DetailValue label={t('最近探测')} value={host.last_probed_at ? new Date(host.last_probed_at).toLocaleString(language) : '-'} />
             <DetailValue label="SSH" value={`${host.ssh_user || t('未设置')} @ ${host.ssh_port}`} mono />
             <DetailValue label={t('数据更新')} value={formatUpdateInterval(host.update_interval_seconds)} />
-            <DetailValue label={t('SSH 密码')} value={host.has_ssh_password ? t('已保存') : t('未保存')} />
-            <DetailValue label={t('SSH 身份文件')} value={host.has_ssh_identity ? t('已保存') : t('未保存')} />
+            <DetailValue label={t('连接方式')} value={host.ssh_auth_type === 'key' ? t('SSH 密钥') : t('账户密码')} />
+            <DetailValue
+              label={host.ssh_auth_type === 'key' ? t('SSH 密钥') : t('SSH 密码')}
+              value={host.ssh_auth_type === 'key' ? (host.ssh_key_name || t('未设置')) : (host.has_ssh_password ? t('已保存') : t('未保存'))}
+            />
             <DetailValue label={t('最后上报')} value={host.last_seen ? new Date(host.last_seen).toLocaleString(language) : t('从未上报')} />
             <DetailValue label={t('探针 ID')} value={host.agent_id || t('未注册')} mono />
             <DetailValue label={t('创建时间')} value={new Date(host.created_at).toLocaleString(language)} />

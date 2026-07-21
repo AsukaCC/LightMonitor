@@ -152,3 +152,13 @@ export async function deleteSshKey(id: string, token: string, onUnauthorized?: (
   }, token, onUnauthorized)
   if (!response.ok) throw new Error(await readError(response))
 }
+
+export async function assignSshKeyHosts(id: string, hostIds: string[], token: string, onUnauthorized?: () => void) {
+  const response = await authFetch(`/api/ssh-keys/${encodeURIComponent(id)}/hosts`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host_ids: hostIds }),
+  }, token, onUnauthorized)
+  if (!response.ok) throw new Error(await readError(response))
+  return (await response.json()) as SshKey
+}

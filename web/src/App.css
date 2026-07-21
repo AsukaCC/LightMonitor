@@ -564,14 +564,17 @@
 }
 
 .ssh-key-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
   padding: 14px 16px;
   border: 2px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-elevated-solid);
+}
+
+.ssh-key-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .ssh-key-info {
@@ -592,6 +595,38 @@
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.ssh-key-bindings {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 2px solid var(--border);
+}
+
+.ssh-key-binding-head,
+.ssh-key-binding-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ssh-key-host-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+}
+
+.ssh-key-host-list .checkbox-row {
+  min-width: 0;
+}
+
+.ssh-key-host-list .checkbox-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-picker {
@@ -688,7 +723,7 @@
     justify-content: center;
   }
 
-  .ssh-key-row {
+  .ssh-key-row-main {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -696,6 +731,10 @@
   .ssh-key-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  .ssh-key-host-list {
+    grid-template-columns: 1fr;
   }
 
   .version-overview {
@@ -1892,6 +1931,39 @@ textarea:focus {
   box-shadow: var(--shadow);
 }
 
+.auth-type-field {
+  display: grid;
+  gap: 8px;
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.auth-type-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+}
+
+.auth-type-tabs button {
+  border-radius: 0;
+}
+
+.auth-type-tabs button:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.auth-type-tabs button:last-child {
+  margin-left: -2px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.auth-type-tabs button:hover {
+  position: relative;
+  transform: none;
+}
+
 .conn-pill {
   display: inline-flex;
   align-items: center;
@@ -2309,6 +2381,27 @@ textarea:focus {
 
 .install-modal {
   width: min(100%, 580px);
+}
+
+.install-auth-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  padding: 14px 0;
+  border-block: 2px solid var(--border);
+}
+
+.install-auth-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.install-auth-summary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
 }
 
 .install-status {
