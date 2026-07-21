@@ -1113,6 +1113,7 @@ input[type='text'],
 input[type='password'],
 input:not([type]),
 input[type='number'],
+input[type='date'],
 select,
 textarea {
   width: 100%;
@@ -1127,6 +1128,26 @@ textarea {
   outline: none;
   box-shadow: var(--shadow-recessed);
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+input[type='date'] {
+  min-width: 0;
+  padding-right: 10px;
+}
+
+input[type='date']::-webkit-calendar-picker-indicator {
+  flex-shrink: 0;
+  margin-left: 8px;
+  padding: 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: background-color 0.2s ease, opacity 0.2s ease;
+}
+
+input[type='date']::-webkit-calendar-picker-indicator:hover {
+  background: var(--accent-soft);
+  opacity: 1;
 }
 
 select {
