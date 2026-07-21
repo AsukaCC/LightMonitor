@@ -1,11 +1,13 @@
 use crate::credential::CredentialCipher;
 use crate::models::{
-    CreateHostRequest, Host, HostStatus, InstallLog, MetricHistoryPoint, SshKey, SystemSample,
-    UpdateHostRequest,
+    CreateHostDomainRequest, CreateHostRequest, Host, HostDomain, HostStatus, InstallLog,
+    MetricHistoryPoint, SshAuthType, SshKey, SystemSample, UpdateHostRequest,
 };
+use crate::probe::{DomainProbeResult, HostProbeResult};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -36,11 +38,20 @@ impl Db {
                 name TEXT NOT NULL,
                 address TEXT NOT NULL,
                 region TEXT NOT NULL DEFAULT '',
+                expires_at TEXT,
+                resolved_ipv4_json TEXT NOT NULL DEFAULT '[]',
+                resolved_ipv6_json TEXT NOT NULL DEFAULT '[]',
+                latency_ms REAL,
+                packet_loss_percent REAL,
+                last_probed_at TEXT,
+                probe_error TEXT NOT NULL DEFAULT '',
                 ssh_user TEXT NOT NULL,
                 ssh_port INTEGER NOT NULL,
                 update_interval_seconds INTEGER NOT NULL DEFAULT 5,
                 ssh_password TEXT NOT NULL DEFAULT '',
                 ssh_key_path TEXT NOT NULL DEFAULT '',
+                ssh_auth_type TEXT NOT NULL DEFAULT 'password',
+                ssh_key_id TEXT,
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL,
                 agent_id TEXT,
@@ -75,6 +86,24 @@ impl Db {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS host_domains (
+                id TEXT PRIMARY KEY NOT NULL,
+                host_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 443,
+                resolved_ipv4_json TEXT NOT NULL DEFAULT '[]',
+                resolved_ipv6_json TEXT NOT NULL DEFAULT '[]',
+                ssl_expires_at TEXT,
+                ssl_status TEXT NOT NULL DEFAULT 'pending',
+                latency_ms REAL,
+                packet_loss_percent REAL,
+                last_checked_at TEXT,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE,
+                UNIQUE(host_id, domain, port)
+            );
+
             CREATE TABLE IF NOT EXISTS metric_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 host_id TEXT NOT NULL,
@@ -85,12 +114,15 @@ impl Db {
                 load_one REAL NOT NULL,
                 network_rx_bytes INTEGER NOT NULL,
                 network_tx_bytes INTEGER NOT NULL,
+                network_rx_rate REAL,
+                network_tx_rate REAL,
                 FOREIGN KEY(host_id) REFERENCES hosts(id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_hosts_agent_token ON hosts(agent_token);
             CREATE INDEX IF NOT EXISTS idx_hosts_status ON hosts(status);
             CREATE INDEX IF NOT EXISTS idx_install_logs_host ON install_logs(host_id);
+            CREATE INDEX IF NOT EXISTS idx_host_domains_host ON host_domains(host_id);
             CREATE INDEX IF NOT EXISTS idx_metric_history_host_time ON metric_history(host_id, collected_at);
             CREATE INDEX IF NOT EXISTS idx_metric_history_time ON metric_history(collected_at);
             ",
@@ -114,6 +146,45 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE hosts ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE hosts ADD COLUMN ssh_auth_type TEXT NOT NULL DEFAULT 'password'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE hosts ADD COLUMN ssh_key_id TEXT", []);
+        let _ = conn.execute(
+            "UPDATE hosts SET ssh_key_id = (
+                SELECT id FROM ssh_keys WHERE storage_path = hosts.ssh_key_path
+             ) WHERE ssh_key_path <> '' AND ssh_key_id IS NULL",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE hosts SET ssh_auth_type = 'key' WHERE ssh_key_path <> ''",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE hosts ADD COLUMN expires_at TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE hosts ADD COLUMN resolved_ipv4_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE hosts ADD COLUMN resolved_ipv6_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE hosts ADD COLUMN latency_ms REAL", []);
+        let _ = conn.execute("ALTER TABLE hosts ADD COLUMN packet_loss_percent REAL", []);
+        let _ = conn.execute("ALTER TABLE hosts ADD COLUMN last_probed_at TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE hosts ADD COLUMN probe_error TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE metric_history ADD COLUMN network_rx_rate REAL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE metric_history ADD COLUMN network_tx_rate REAL",
             [],
         );
         let db = Self {
@@ -210,17 +281,32 @@ impl Db {
             for row in rows {
                 let (id, name, storage_path, size_bytes, updated_at) = row?;
                 let id = Uuid::parse_str(&id)?;
-                let in_use = conn.query_row(
-                    "SELECT COUNT(*) FROM hosts WHERE ssh_key_path = ?1",
-                    params![storage_path],
-                    |row| row.get::<_, i64>(0),
-                )? > 0;
+                let mut host_statement = conn.prepare(
+                    "SELECT id, name FROM hosts
+                     WHERE ssh_key_id = ?1 OR (ssh_key_id IS NULL AND ssh_key_path = ?2)
+                     ORDER BY name ASC",
+                )?;
+                let bindings = host_statement
+                    .query_map(params![id.to_string(), storage_path], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let host_ids = bindings
+                    .iter()
+                    .filter_map(|(host_id, _)| Uuid::parse_str(host_id).ok())
+                    .collect::<Vec<_>>();
+                let host_names = bindings
+                    .into_iter()
+                    .map(|(_, host_name)| host_name)
+                    .collect::<Vec<_>>();
                 keys.push(SshKey {
                     id,
                     name,
                     size_bytes: size_bytes.max(0) as u64,
                     updated_at: parse_dt(&updated_at),
-                    in_use,
+                    in_use: !host_ids.is_empty(),
+                    host_ids,
+                    host_names,
                 });
             }
             Ok(keys)
@@ -290,8 +376,8 @@ impl Db {
                 return Ok(None);
             };
             let in_use = conn.query_row(
-                "SELECT COUNT(*) FROM hosts WHERE ssh_key_path = ?1",
-                params![storage_path],
+                "SELECT COUNT(*) FROM hosts WHERE ssh_key_id = ?1 OR ssh_key_path = ?2",
+                params![id.to_string(), storage_path],
                 |row| row.get::<_, i64>(0),
             )?;
             if in_use > 0 {
@@ -305,75 +391,84 @@ impl Db {
         })
     }
 
+    pub fn assign_ssh_key_hosts(&self, id: Uuid, host_ids: &[Uuid]) -> Result<Vec<Host>> {
+        self.with_conn(|conn| {
+            let storage_path = conn
+                .query_row(
+                    "SELECT storage_path FROM ssh_keys WHERE id = ?1",
+                    params![id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .context("SSH key not found")?;
+            let requested = host_ids.iter().copied().collect::<HashSet<_>>();
+            if requested.len() != host_ids.len() {
+                bail!("duplicate host assignment");
+            }
+
+            for host_id in &requested {
+                let assignable = conn
+                    .query_row(
+                        "SELECT is_system = 0 FROM hosts WHERE id = ?1",
+                        params![host_id.to_string()],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if !assignable {
+                    bail!("host {host_id} does not exist or cannot use an SSH key");
+                }
+            }
+
+            let mut statement =
+                conn.prepare("SELECT id FROM hosts WHERE ssh_key_id = ?1 OR ssh_key_path = ?2")?;
+            let existing = statement
+                .query_map(params![id.to_string(), storage_path], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .filter_map(|row| row.ok())
+                .filter_map(|host_id| Uuid::parse_str(&host_id).ok())
+                .collect::<HashSet<_>>();
+
+            for host_id in existing.difference(&requested) {
+                conn.execute(
+                    "UPDATE hosts SET ssh_auth_type = 'password', ssh_key_id = NULL,
+                     ssh_key_path = '', updated_at = ?1 WHERE id = ?2",
+                    params![Utc::now().to_rfc3339(), host_id.to_string()],
+                )?;
+            }
+            for host_id in &requested {
+                conn.execute(
+                    "UPDATE hosts SET ssh_auth_type = 'key', ssh_key_id = ?1,
+                     ssh_key_path = ?2, ssh_password = '', updated_at = ?3 WHERE id = ?4",
+                    params![
+                        id.to_string(),
+                        storage_path,
+                        Utc::now().to_rfc3339(),
+                        host_id.to_string(),
+                    ],
+                )?;
+            }
+
+            let mut hosts = Vec::new();
+            for host_id in existing.union(&requested) {
+                if let Some(host) = get_host_conn(conn, *host_id)? {
+                    hosts.push(host);
+                }
+            }
+            Ok(hosts)
+        })
+    }
+
     pub fn list_hosts(&self) -> Result<Vec<Host>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, name, address, region, ssh_user, ssh_port, ssh_password, ssh_key_path, tags_json, status, agent_id,
-                        latest_json, last_seen, update_interval_seconds, created_at, is_system
-                 FROM hosts ORDER BY is_system DESC, created_at DESC",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, String>(14)?,
-                    row.get::<_, i64>(15)?,
-                ))
-            })?;
+            let query = format!("{HOST_SELECT} ORDER BY is_system DESC, created_at DESC");
+            let mut stmt = conn.prepare(&query)?;
+            let rows = stmt.query_map([], read_host_record)?;
 
             let mut hosts = Vec::new();
             for row in rows {
-                let (
-                    id,
-                    name,
-                    address,
-                    region,
-                    ssh_user,
-                    ssh_port,
-                    ssh_password,
-                    ssh_key_path,
-                    tags_json,
-                    status,
-                    agent_id,
-                    latest_json,
-                    last_seen,
-                    update_interval_seconds,
-                    created_at,
-                    is_system,
-                ) = row?;
-                let host_id = Uuid::parse_str(&id)?;
-                let logs = load_install_logs(conn, &id)?;
-                hosts.push(Host {
-                    id: host_id,
-                    is_system: is_system != 0,
-                    name,
-                    address,
-                    region,
-                    ssh_user,
-                    ssh_port: ssh_port as u16,
-                    update_interval_seconds: update_interval_seconds.max(1) as u64,
-                    has_ssh_password: !ssh_password.is_empty(),
-                    has_ssh_identity: !ssh_key_path.is_empty(),
-                    tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                    status: HostStatus::parse(&status),
-                    agent_id: agent_id.and_then(|v| Uuid::parse_str(&v).ok()),
-                    latest: latest_json.and_then(|v| serde_json::from_str(&v).ok()),
-                    last_seen: last_seen.and_then(|v| DateTime::parse_from_rfc3339(&v).ok().map(|d| d.with_timezone(&Utc))),
-                    install_logs: logs,
-                    created_at: parse_dt(&created_at),
-                });
+                hosts.push(host_from_record(conn, row?)?);
             }
             Ok(hosts)
         })
@@ -430,21 +525,33 @@ impl Db {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let tags_json = serde_json::to_string(&req.tags)?;
-        let encrypted_password = self.credentials.encrypt(&req.ssh_password)?;
+        let encrypted_password = if req.ssh_auth_type == SshAuthType::Password {
+            self.credentials.encrypt(&req.ssh_password)?
+        } else {
+            String::new()
+        };
         self.with_conn(|conn| {
+            let (ssh_key_id, ssh_key_path) =
+                resolve_ssh_key(conn, req.ssh_auth_type, req.ssh_key_id)?;
             conn.execute(
                 "INSERT INTO hosts (
-                    id, name, address, region, ssh_user, ssh_port, ssh_password, tags_json, status,
-                    agent_id, agent_token, latest_json, last_seen, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, NULL, NULL, ?11, ?12)",
+                    id, name, address, region, expires_at, ssh_user, ssh_port, ssh_password,
+                    ssh_auth_type, ssh_key_id, ssh_key_path, tags_json, status, agent_id,
+                    agent_token, latest_json, last_seen, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                          NULL, ?14, NULL, NULL, ?15, ?16)",
                 params![
                     id.to_string(),
                     req.name,
                     req.address,
                     req.region,
+                    req.expires_at.map(|value| value.to_rfc3339()),
                     req.ssh_user,
                     req.ssh_port as i64,
                     encrypted_password,
+                    req.ssh_auth_type.as_str(),
+                    ssh_key_id.map(|value| value.to_string()),
+                    ssh_key_path,
                     tags_json,
                     HostStatus::Pending.as_str(),
                     agent_token,
@@ -467,10 +574,32 @@ impl Db {
             self.credentials.encrypt(&req.ssh_password)?
         };
         let changed = self.with_conn(|conn| {
-            let n = if req.clear_ssh_password {
+            let (ssh_key_id, ssh_key_path) =
+                resolve_ssh_key(conn, req.ssh_auth_type, req.ssh_key_id)?;
+            let n = if req.ssh_auth_type == SshAuthType::Key {
                 conn.execute(
                     "UPDATE hosts SET name = ?1, address = ?2, region = ?3, ssh_user = ?4, ssh_port = ?5,
-                     ssh_password = '', tags_json = ?6, updated_at = ?7 WHERE id = ?8",
+                     ssh_auth_type = 'key', ssh_key_id = ?6, ssh_key_path = ?7, ssh_password = '',
+                     tags_json = ?8, expires_at = ?9, updated_at = ?10 WHERE id = ?11",
+                    params![
+                        req.name,
+                        req.address,
+                        req.region,
+                        req.ssh_user,
+                        req.ssh_port as i64,
+                        ssh_key_id.map(|value| value.to_string()),
+                        ssh_key_path,
+                        tags_json,
+                        req.expires_at.map(|value| value.to_rfc3339()),
+                        now,
+                        id.to_string()
+                    ],
+                )?
+            } else if req.clear_ssh_password {
+                conn.execute(
+                    "UPDATE hosts SET name = ?1, address = ?2, region = ?3, ssh_user = ?4, ssh_port = ?5,
+                     ssh_auth_type = 'password', ssh_key_id = NULL, ssh_key_path = '', ssh_password = '',
+                     tags_json = ?6, expires_at = ?7, updated_at = ?8 WHERE id = ?9",
                     params![
                         req.name,
                         req.address,
@@ -478,6 +607,7 @@ impl Db {
                         req.ssh_user,
                         req.ssh_port as i64,
                         tags_json,
+                        req.expires_at.map(|value| value.to_rfc3339()),
                         now,
                         id.to_string()
                     ],
@@ -485,7 +615,8 @@ impl Db {
             } else if !req.ssh_password.is_empty() {
                 conn.execute(
                     "UPDATE hosts SET name = ?1, address = ?2, region = ?3, ssh_user = ?4, ssh_port = ?5,
-                     ssh_password = ?6, tags_json = ?7, updated_at = ?8 WHERE id = ?9",
+                     ssh_auth_type = 'password', ssh_key_id = NULL, ssh_key_path = '', ssh_password = ?6,
+                     tags_json = ?7, expires_at = ?8, updated_at = ?9 WHERE id = ?10",
                     params![
                         req.name,
                         req.address,
@@ -494,6 +625,7 @@ impl Db {
                         req.ssh_port as i64,
                         encrypted_password,
                         tags_json,
+                        req.expires_at.map(|value| value.to_rfc3339()),
                         now,
                         id.to_string()
                     ],
@@ -501,7 +633,8 @@ impl Db {
             } else {
                 conn.execute(
                     "UPDATE hosts SET name = ?1, address = ?2, region = ?3, ssh_user = ?4, ssh_port = ?5,
-                     tags_json = ?6, updated_at = ?7 WHERE id = ?8",
+                     ssh_auth_type = 'password', ssh_key_id = NULL, ssh_key_path = '',
+                     tags_json = ?6, expires_at = ?7, updated_at = ?8 WHERE id = ?9",
                     params![
                         req.name,
                         req.address,
@@ -509,6 +642,7 @@ impl Db {
                         req.ssh_user,
                         req.ssh_port as i64,
                         tags_json,
+                        req.expires_at.map(|value| value.to_rfc3339()),
                         now,
                         id.to_string()
                     ],
@@ -520,6 +654,104 @@ impl Db {
             return Ok(None);
         }
         self.get_host(id)
+    }
+
+    pub fn add_host_domain(
+        &self,
+        host_id: Uuid,
+        request: CreateHostDomainRequest,
+    ) -> Result<Option<Host>> {
+        self.with_conn(|conn| {
+            let host_exists = conn
+                .query_row(
+                    "SELECT 1 FROM hosts WHERE id = ?1",
+                    params![host_id.to_string()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !host_exists {
+                return Ok(None);
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO host_domains (
+                    id, host_id, domain, port, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    host_id.to_string(),
+                    request.domain,
+                    request.port as i64,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            get_host_conn(conn, host_id)
+        })
+    }
+
+    pub fn delete_host_domain(&self, host_id: Uuid, domain_id: Uuid) -> Result<Option<Host>> {
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "DELETE FROM host_domains WHERE id = ?1 AND host_id = ?2",
+                params![domain_id.to_string(), host_id.to_string()],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            get_host_conn(conn, host_id)
+        })
+    }
+
+    pub fn apply_probe_results(
+        &self,
+        host_id: Uuid,
+        host_probe: &HostProbeResult,
+        domain_probes: &[DomainProbeResult],
+    ) -> Result<Option<Host>> {
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE hosts SET resolved_ipv4_json = ?1, resolved_ipv6_json = ?2,
+                 latency_ms = ?3, packet_loss_percent = ?4, last_probed_at = ?5,
+                 probe_error = ?6,
+                 region = CASE WHEN ?7 <> '' THEN ?7 ELSE region END,
+                 updated_at = ?5 WHERE id = ?8",
+                params![
+                    serde_json::to_string(&host_probe.resolved_ipv4)?,
+                    serde_json::to_string(&host_probe.resolved_ipv6)?,
+                    host_probe.latency_ms,
+                    host_probe.packet_loss_percent,
+                    host_probe.checked_at.to_rfc3339(),
+                    host_probe.error.as_deref().unwrap_or_default(),
+                    host_probe.region,
+                    host_id.to_string(),
+                ],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+
+            for probe in domain_probes {
+                conn.execute(
+                    "UPDATE host_domains SET resolved_ipv4_json = ?1, resolved_ipv6_json = ?2,
+                     ssl_expires_at = ?3, ssl_status = ?4, latency_ms = ?5,
+                     packet_loss_percent = ?6, last_checked_at = ?7, last_error = ?8
+                     WHERE id = ?9 AND host_id = ?10",
+                    params![
+                        serde_json::to_string(&probe.resolved_ipv4)?,
+                        serde_json::to_string(&probe.resolved_ipv6)?,
+                        probe.ssl_expires_at.map(|value| value.to_rfc3339()),
+                        probe.ssl_status,
+                        probe.latency_ms,
+                        probe.packet_loss_percent,
+                        probe.checked_at.to_rfc3339(),
+                        probe.error.as_deref().unwrap_or_default(),
+                        probe.id.to_string(),
+                        host_id.to_string(),
+                    ],
+                )?;
+            }
+            get_host_conn(conn, host_id)
+        })
     }
 
     pub fn ssh_credentials(&self, id: Uuid) -> Result<Option<(String, String)>> {
@@ -539,16 +771,6 @@ impl Db {
                     .map(|password| (password, key_path))
             })
             .transpose()
-    }
-
-    pub fn set_ssh_key_path(&self, id: Uuid, key_path: &str) -> Result<()> {
-        self.with_conn(|conn| {
-            conn.execute(
-                "UPDATE hosts SET ssh_key_path = ?1, updated_at = ?2 WHERE id = ?3",
-                params![key_path, Utc::now().to_rfc3339(), id.to_string()],
-            )?;
-            Ok(())
-        })
     }
 
     pub fn delete_hosts(&self, ids: &[Uuid]) -> Result<Vec<Uuid>> {
@@ -760,7 +982,7 @@ impl Db {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT collected_at, cpu_percent, memory_percent, disk_percent, load_one,
-                        network_rx_bytes, network_tx_bytes
+                        network_rx_bytes, network_tx_bytes, network_rx_rate, network_tx_rate
                  FROM metric_history
                  WHERE host_id = ?1 AND collected_at >= ?2
                  ORDER BY collected_at ASC",
@@ -776,6 +998,8 @@ impl Db {
                         load_one: row.get(4)?,
                         network_rx_bytes: row.get::<_, i64>(5)?.max(0) as u64,
                         network_tx_bytes: row.get::<_, i64>(6)?.max(0) as u64,
+                        network_rx_rate: row.get(7)?,
+                        network_tx_rate: row.get(8)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -835,7 +1059,8 @@ fn store_metric_sample(
     host_id: Uuid,
     sample: &SystemSample,
 ) -> Result<Option<Host>> {
-    let latest_json = serde_json::to_string(sample)?;
+    let sample = normalize_network_rates(conn, host_id, sample)?;
+    let latest_json = serde_json::to_string(&sample)?;
     let now = Utc::now();
     let changed = conn.execute(
         "UPDATE hosts SET latest_json = ?1, last_seen = ?2, status = ?3, updated_at = ?4
@@ -868,8 +1093,8 @@ fn store_metric_sample(
     conn.execute(
         "INSERT INTO metric_history (
             host_id, collected_at, cpu_percent, memory_percent, disk_percent, load_one,
-            network_rx_bytes, network_tx_bytes
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            network_rx_bytes, network_tx_bytes, network_rx_rate, network_tx_rate
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             host_id.to_string(),
             sample.collected_at.to_rfc3339(),
@@ -879,6 +1104,8 @@ fn store_metric_sample(
             sample.load_average[0],
             sample.network_rx_bytes as i64,
             sample.network_tx_bytes as i64,
+            sample.network_rx_rate,
+            sample.network_tx_rate,
         ],
     )?;
     let retention = (now - Duration::days(7)).to_rfc3339();
@@ -889,82 +1116,228 @@ fn store_metric_sample(
     get_host_conn(conn, host_id)
 }
 
-fn get_host_conn(conn: &Connection, id: Uuid) -> Result<Option<Host>> {
-    let row = conn
+fn normalize_network_rates(
+    conn: &Connection,
+    host_id: Uuid,
+    sample: &SystemSample,
+) -> Result<SystemSample> {
+    let mut normalized = sample.clone();
+    normalized.network_rx_rate = valid_network_rate(normalized.network_rx_rate);
+    normalized.network_tx_rate = valid_network_rate(normalized.network_tx_rate);
+
+    if normalized.network_rx_rate.is_some() && normalized.network_tx_rate.is_some() {
+        return Ok(normalized);
+    }
+
+    let previous = conn
         .query_row(
-            "SELECT id, name, address, region, ssh_user, ssh_port, ssh_password, ssh_key_path, tags_json, status, agent_id,
-                    latest_json, last_seen, update_interval_seconds, created_at, is_system
-             FROM hosts WHERE id = ?1",
-            params![id.to_string()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, String>(14)?,
-                    row.get::<_, i64>(15)?,
-                ))
-            },
+            "SELECT latest_json FROM hosts WHERE id = ?1",
+            params![host_id.to_string()],
+            |row| row.get::<_, Option<String>>(0),
         )
+        .optional()?
+        .flatten()
+        .and_then(|json| serde_json::from_str::<SystemSample>(&json).ok());
+
+    if let Some(previous) = previous {
+        let elapsed =
+            (normalized.collected_at - previous.collected_at).num_milliseconds() as f64 / 1000.0;
+        if elapsed > 0.0 {
+            normalized.network_rx_rate.get_or_insert_with(|| {
+                normalized
+                    .network_rx_bytes
+                    .saturating_sub(previous.network_rx_bytes) as f64
+                    / elapsed
+            });
+            normalized.network_tx_rate.get_or_insert_with(|| {
+                normalized
+                    .network_tx_bytes
+                    .saturating_sub(previous.network_tx_bytes) as f64
+                    / elapsed
+            });
+        }
+    }
+
+    normalized.network_rx_rate.get_or_insert(0.0);
+    normalized.network_tx_rate.get_or_insert(0.0);
+    Ok(normalized)
+}
+
+fn valid_network_rate(rate: Option<f64>) -> Option<f64> {
+    rate.filter(|rate| rate.is_finite() && *rate >= 0.0)
+}
+
+const HOST_SELECT: &str =
+    "SELECT id, name, address, region, ssh_user, ssh_port, ssh_password, ssh_key_path,
+            ssh_auth_type, ssh_key_id,
+            (SELECT name FROM ssh_keys WHERE id = hosts.ssh_key_id),
+            tags_json, status, agent_id, latest_json, last_seen, update_interval_seconds,
+            created_at, is_system, expires_at, resolved_ipv4_json, resolved_ipv6_json,
+            latency_ms, packet_loss_percent, last_probed_at, probe_error
+     FROM hosts";
+
+struct HostRecord {
+    id: String,
+    name: String,
+    address: String,
+    region: String,
+    ssh_user: String,
+    ssh_port: i64,
+    ssh_password: String,
+    ssh_key_path: String,
+    ssh_auth_type: String,
+    ssh_key_id: Option<String>,
+    ssh_key_name: Option<String>,
+    tags_json: String,
+    status: String,
+    agent_id: Option<String>,
+    latest_json: Option<String>,
+    last_seen: Option<String>,
+    update_interval_seconds: i64,
+    created_at: String,
+    is_system: i64,
+    expires_at: Option<String>,
+    resolved_ipv4_json: String,
+    resolved_ipv6_json: String,
+    latency_ms: Option<f64>,
+    packet_loss_percent: Option<f64>,
+    last_probed_at: Option<String>,
+    probe_error: String,
+}
+
+fn read_host_record(row: &Row<'_>) -> rusqlite::Result<HostRecord> {
+    Ok(HostRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        address: row.get(2)?,
+        region: row.get(3)?,
+        ssh_user: row.get(4)?,
+        ssh_port: row.get(5)?,
+        ssh_password: row.get(6)?,
+        ssh_key_path: row.get(7)?,
+        ssh_auth_type: row.get(8)?,
+        ssh_key_id: row.get(9)?,
+        ssh_key_name: row.get(10)?,
+        tags_json: row.get(11)?,
+        status: row.get(12)?,
+        agent_id: row.get(13)?,
+        latest_json: row.get(14)?,
+        last_seen: row.get(15)?,
+        update_interval_seconds: row.get(16)?,
+        created_at: row.get(17)?,
+        is_system: row.get(18)?,
+        expires_at: row.get(19)?,
+        resolved_ipv4_json: row.get(20)?,
+        resolved_ipv6_json: row.get(21)?,
+        latency_ms: row.get(22)?,
+        packet_loss_percent: row.get(23)?,
+        last_probed_at: row.get(24)?,
+        probe_error: row.get(25)?,
+    })
+}
+
+fn get_host_conn(conn: &Connection, id: Uuid) -> Result<Option<Host>> {
+    let query = format!("{HOST_SELECT} WHERE id = ?1");
+    let row = conn
+        .query_row(&query, params![id.to_string()], read_host_record)
         .optional()?;
 
-    let Some((
-        id_str,
-        name,
-        address,
-        region,
-        ssh_user,
-        ssh_port,
-        ssh_password,
-        ssh_key_path,
-        tags_json,
-        status,
-        agent_id,
-        latest_json,
-        last_seen,
-        update_interval_seconds,
-        created_at,
-        is_system,
-    )) = row
-    else {
+    let Some(record) = row else {
         return Ok(None);
     };
 
-    let logs = load_install_logs(conn, &id_str)?;
-    Ok(Some(Host {
-        id: Uuid::parse_str(&id_str)?,
-        is_system: is_system != 0,
-        name,
-        address,
-        region,
-        ssh_user,
-        ssh_port: ssh_port as u16,
-        update_interval_seconds: update_interval_seconds.max(1) as u64,
-        has_ssh_password: !ssh_password.is_empty(),
-        has_ssh_identity: !ssh_key_path.is_empty(),
-        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        status: HostStatus::parse(&status),
-        agent_id: agent_id.and_then(|v| Uuid::parse_str(&v).ok()),
-        latest: latest_json.and_then(|v| serde_json::from_str(&v).ok()),
-        last_seen: last_seen.and_then(|v| {
-            DateTime::parse_from_rfc3339(&v)
-                .ok()
-                .map(|d| d.with_timezone(&Utc))
-        }),
-        install_logs: logs,
-        created_at: parse_dt(&created_at),
-    }))
+    host_from_record(conn, record).map(Some)
+}
+
+fn host_from_record(conn: &Connection, record: HostRecord) -> Result<Host> {
+    let host_id = Uuid::parse_str(&record.id)?;
+    Ok(Host {
+        id: host_id,
+        is_system: record.is_system != 0,
+        name: record.name,
+        address: record.address,
+        region: record.region,
+        expires_at: record.expires_at.as_deref().map(parse_dt),
+        resolved_ipv4: serde_json::from_str(&record.resolved_ipv4_json).unwrap_or_default(),
+        resolved_ipv6: serde_json::from_str(&record.resolved_ipv6_json).unwrap_or_default(),
+        latency_ms: record.latency_ms,
+        packet_loss_percent: record.packet_loss_percent,
+        last_probed_at: record.last_probed_at.as_deref().map(parse_dt),
+        probe_error: (!record.probe_error.is_empty()).then_some(record.probe_error),
+        domains: load_host_domains(conn, &record.id)?,
+        ssh_user: record.ssh_user,
+        ssh_port: record.ssh_port as u16,
+        ssh_auth_type: SshAuthType::parse(&record.ssh_auth_type),
+        ssh_key_id: record
+            .ssh_key_id
+            .as_deref()
+            .and_then(|value| Uuid::parse_str(value).ok()),
+        ssh_key_name: record.ssh_key_name,
+        update_interval_seconds: record.update_interval_seconds.max(1) as u64,
+        has_ssh_password: !record.ssh_password.is_empty(),
+        has_ssh_identity: !record.ssh_key_path.is_empty(),
+        tags: serde_json::from_str(&record.tags_json).unwrap_or_default(),
+        status: HostStatus::parse(&record.status),
+        agent_id: record
+            .agent_id
+            .and_then(|value| Uuid::parse_str(&value).ok()),
+        latest: record
+            .latest_json
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        last_seen: record.last_seen.as_deref().map(parse_dt),
+        install_logs: load_install_logs(conn, &record.id)?,
+        created_at: parse_dt(&record.created_at),
+    })
+}
+
+fn resolve_ssh_key(
+    conn: &Connection,
+    auth_type: SshAuthType,
+    key_id: Option<Uuid>,
+) -> Result<(Option<Uuid>, String)> {
+    if auth_type == SshAuthType::Password {
+        return Ok((None, String::new()));
+    }
+    let key_id = key_id.context("SSH key is required for key authentication")?;
+    let storage_path = conn
+        .query_row(
+            "SELECT storage_path FROM ssh_keys WHERE id = ?1",
+            params![key_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .context("selected SSH key no longer exists")?;
+    Ok((Some(key_id), storage_path))
+}
+
+fn load_host_domains(conn: &Connection, host_id: &str) -> Result<Vec<HostDomain>> {
+    let mut statement = conn.prepare(
+        "SELECT id, domain, port, resolved_ipv4_json, resolved_ipv6_json, ssl_expires_at,
+                ssl_status, latency_ms, packet_loss_percent, last_checked_at, last_error, created_at
+         FROM host_domains WHERE host_id = ?1 ORDER BY domain ASC, port ASC",
+    )?;
+    statement
+        .query_map(params![host_id], |row| {
+            let ssl_expires_at: Option<String> = row.get(5)?;
+            let last_checked_at: Option<String> = row.get(9)?;
+            let last_error: String = row.get(10)?;
+            Ok(HostDomain {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                domain: row.get(1)?,
+                port: row.get::<_, i64>(2)?.clamp(1, u16::MAX as i64) as u16,
+                resolved_ipv4: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                resolved_ipv6: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+                ssl_expires_at: ssl_expires_at.as_deref().map(parse_dt),
+                ssl_status: row.get(6)?,
+                latency_ms: row.get(7)?,
+                packet_loss_percent: row.get(8)?,
+                last_checked_at: last_checked_at.as_deref().map(parse_dt),
+                last_error: (!last_error.is_empty()).then_some(last_error),
+                created_at: parse_dt(&row.get::<_, String>(11)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn load_install_logs(conn: &Connection, host_id: &str) -> Result<Vec<InstallLog>> {
@@ -1031,9 +1404,24 @@ fn downsample_history(
                 load_one: bucket.iter().map(|point| point.load_one).sum::<f64>() / count,
                 network_rx_bytes: last.network_rx_bytes,
                 network_tx_bytes: last.network_tx_bytes,
+                network_rx_rate: average_optional_rate(bucket, |point| point.network_rx_rate),
+                network_tx_rate: average_optional_rate(bucket, |point| point.network_tx_rate),
             }
         })
         .collect()
+}
+
+fn average_optional_rate(
+    points: &[MetricHistoryPoint],
+    rate: impl Fn(&MetricHistoryPoint) -> Option<f64>,
+) -> Option<f64> {
+    let (sum, count) = points
+        .iter()
+        .filter_map(rate)
+        .fold((0.0, 0usize), |(sum, count), value| {
+            (sum + value, count + 1)
+        });
+    (count > 0).then(|| sum / count as f64)
 }
 
 #[cfg(test)]
@@ -1084,6 +1472,8 @@ mod tests {
             load_average: [0.5, 0.25, 0.1],
             network_rx_bytes: 1024,
             network_tx_bytes: 512,
+            network_rx_rate: Some(2048.0),
+            network_tx_rate: Some(1024.0),
             disks: vec![DiskSample {
                 name: "test-disk".to_string(),
                 mount_point: "/".to_string(),
@@ -1094,7 +1484,10 @@ mod tests {
         };
         let monitored = db.apply_system_metrics(&sample).unwrap();
         assert_eq!(monitored.status, HostStatus::Online);
-        assert_eq!(monitored.latest.unwrap().cpu_percent, 12.5);
+        let latest = monitored.latest.unwrap();
+        assert_eq!(latest.cpu_percent, 12.5);
+        assert_eq!(latest.network_rx_rate, Some(2048.0));
+        assert_eq!(latest.network_tx_rate, Some(1024.0));
 
         let same_host = db
             .ensure_system_host_with_details("127.0.0.1", "本机")
@@ -1124,8 +1517,11 @@ mod tests {
                     name: "自定义服务器".to_string(),
                     address: "192.0.2.10".to_string(),
                     region: String::new(),
+                    expires_at: None,
                     ssh_user: String::new(),
                     ssh_port: 22,
+                    ssh_auth_type: SshAuthType::Password,
+                    ssh_key_id: None,
                     ssh_password: String::new(),
                     tags: Vec::new(),
                 },
@@ -1192,6 +1588,8 @@ mod tests {
                 load_average: [index as f64, 0.0, 0.0],
                 network_rx_bytes: index * 1024,
                 network_tx_bytes: index * 512,
+                network_rx_rate: None,
+                network_tx_rate: None,
                 disks: vec![DiskSample {
                     name: "test-disk".to_string(),
                     mount_point: "/".to_string(),
@@ -1209,8 +1607,185 @@ mod tests {
             .unwrap();
         assert!(history.len() <= 4);
         assert_eq!(history.last().unwrap().network_rx_bytes, 9 * 1024);
+        let latest_rx_rate = history.last().unwrap().network_rx_rate.unwrap();
+        let latest_tx_rate = history.last().unwrap().network_tx_rate.unwrap();
+        assert!((latest_rx_rate - 1024.0).abs() < 5.0);
+        assert!((latest_tx_rate - 512.0).abs() < 5.0);
         assert!(history.last().unwrap().memory_percent > 0.0);
 
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn stores_host_domains_expiry_and_probe_results() {
+        let path = std::env::temp_dir().join(format!("lightmonitor-domains-{}.db", Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        let expires_at = Utc::now() + Duration::days(90);
+        let host = db
+            .create_host(
+                CreateHostRequest {
+                    name: "domain-test".to_string(),
+                    address: "example.com".to_string(),
+                    region: "🇺🇸 美国".to_string(),
+                    expires_at: Some(expires_at),
+                    ssh_user: String::new(),
+                    ssh_port: 22,
+                    ssh_auth_type: SshAuthType::Password,
+                    ssh_key_id: None,
+                    ssh_password: String::new(),
+                    tags: Vec::new(),
+                },
+                "domain-token".to_string(),
+            )
+            .unwrap();
+        let host = db
+            .add_host_domain(
+                host.id,
+                CreateHostDomainRequest {
+                    domain: "example.com".to_string(),
+                    port: 443,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.domains.len(), 1);
+        assert_eq!(host.expires_at.unwrap().timestamp(), expires_at.timestamp());
+
+        let checked_at = Utc::now();
+        let ssl_expires_at = checked_at + Duration::days(60);
+        let domain_id = host.domains[0].id;
+        let host = db
+            .apply_probe_results(
+                host.id,
+                &HostProbeResult {
+                    resolved_ipv4: vec!["192.0.2.10".to_string()],
+                    resolved_ipv6: vec!["2001:db8::10".to_string()],
+                    latency_ms: Some(12.5),
+                    packet_loss_percent: Some(25.0),
+                    checked_at,
+                    error: None,
+                    region: "🇺🇸 美国 · 加利福尼亚".to_string(),
+                },
+                &[DomainProbeResult {
+                    id: domain_id,
+                    resolved_ipv4: vec!["192.0.2.20".to_string()],
+                    resolved_ipv6: Vec::new(),
+                    ssl_expires_at: Some(ssl_expires_at),
+                    ssl_status: "valid".to_string(),
+                    latency_ms: Some(18.0),
+                    packet_loss_percent: Some(0.0),
+                    checked_at,
+                    error: None,
+                }],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.resolved_ipv4, vec!["192.0.2.10"]);
+        assert_eq!(host.resolved_ipv6, vec!["2001:db8::10"]);
+        assert_eq!(host.latency_ms, Some(12.5));
+        assert_eq!(host.packet_loss_percent, Some(25.0));
+        assert!(host.region.starts_with("🇺🇸"));
+        assert_eq!(host.domains[0].ssl_status, "valid");
+        assert_eq!(host.domains[0].latency_ms, Some(18.0));
+        assert_eq!(
+            host.domains[0].ssl_expires_at.unwrap().timestamp(),
+            ssl_expires_at.timestamp()
+        );
+
+        let host = db.delete_host_domain(host.id, domain_id).unwrap().unwrap();
+        assert!(host.domains.is_empty());
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migrates_probe_columns_for_existing_databases() {
+        let path = std::env::temp_dir().join(format!(
+            "lightmonitor-probe-migration-{}.db",
+            Uuid::new_v4()
+        ));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE hosts (
+                id TEXT PRIMARY KEY NOT NULL,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL,
+                address TEXT NOT NULL,
+                region TEXT NOT NULL DEFAULT '',
+                ssh_user TEXT NOT NULL,
+                ssh_port INTEGER NOT NULL,
+                update_interval_seconds INTEGER NOT NULL DEFAULT 5,
+                ssh_password TEXT NOT NULL DEFAULT '',
+                ssh_key_path TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL,
+                agent_id TEXT,
+                agent_token TEXT NOT NULL UNIQUE,
+                latest_json TEXT,
+                last_seen TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE ssh_keys (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                storage_path TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let legacy_host_id = Uuid::new_v4();
+        let legacy_key_id = Uuid::new_v4();
+        let legacy_key_path = std::env::temp_dir()
+            .join(format!("lightmonitor-legacy-key-{}", Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO ssh_keys (id, name, storage_path, size_bytes, updated_at)
+             VALUES (?1, 'legacy-key', ?2, 42, ?3)",
+            params![legacy_key_id.to_string(), legacy_key_path, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hosts (
+                id, name, address, ssh_user, ssh_port, ssh_key_path, tags_json, status,
+                agent_token, created_at, updated_at
+             ) VALUES (?1, 'legacy-host', '192.0.2.40', 'root', 22, ?2, '[]',
+                       'pending', 'legacy-token', ?3, ?3)",
+            params![legacy_host_id.to_string(), legacy_key_path, now],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        db.with_conn(|conn| {
+            let mut statement = conn.prepare("PRAGMA table_info(hosts)")?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert!(columns.contains(&"expires_at".to_string()));
+            assert!(columns.contains(&"resolved_ipv4_json".to_string()));
+            assert!(columns.contains(&"resolved_ipv6_json".to_string()));
+            assert!(columns.contains(&"latency_ms".to_string()));
+            assert!(columns.contains(&"packet_loss_percent".to_string()));
+            assert!(columns.contains(&"ssh_auth_type".to_string()));
+            assert!(columns.contains(&"ssh_key_id".to_string()));
+            let domain_table: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'host_domains'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(domain_table, 1);
+            Ok(())
+        })
+        .unwrap();
+        let legacy_host = db.get_host(legacy_host_id).unwrap().unwrap();
+        assert_eq!(legacy_host.ssh_auth_type, SshAuthType::Key);
+        assert_eq!(legacy_host.ssh_key_id, Some(legacy_key_id));
+        assert_eq!(legacy_host.ssh_key_name.as_deref(), Some("legacy-key"));
         drop(db);
         cleanup(&path);
     }
@@ -1235,19 +1810,29 @@ mod tests {
                     name: "key-host".to_string(),
                     address: "192.0.2.20".to_string(),
                     region: String::new(),
+                    expires_at: None,
                     ssh_user: "root".to_string(),
                     ssh_port: 22,
+                    ssh_auth_type: SshAuthType::Password,
+                    ssh_key_id: None,
                     ssh_password: String::new(),
                     tags: Vec::new(),
                 },
                 "key-host-token".to_string(),
             )
             .unwrap();
-        db.set_ssh_key_path(host.id, &storage_path).unwrap();
-        assert!(db.list_ssh_keys().unwrap()[0].in_use);
+        let assigned = db.assign_ssh_key_hosts(key_id, &[host.id]).unwrap();
+        assert_eq!(assigned[0].ssh_auth_type, SshAuthType::Key);
+        assert_eq!(assigned[0].ssh_key_id, Some(key_id));
+        let key = &db.list_ssh_keys().unwrap()[0];
+        assert!(key.in_use);
+        assert_eq!(key.host_ids, vec![host.id]);
         assert!(db.delete_ssh_key(key_id).is_err());
 
-        db.set_ssh_key_path(host.id, "").unwrap();
+        db.assign_ssh_key_hosts(key_id, &[]).unwrap();
+        let host = db.get_host(host.id).unwrap().unwrap();
+        assert_eq!(host.ssh_auth_type, SshAuthType::Password);
+        assert_eq!(host.ssh_key_id, None);
         assert_eq!(db.delete_ssh_key(key_id).unwrap(), Some(storage_path));
         drop(db);
         cleanup(&path);
@@ -1264,8 +1849,11 @@ mod tests {
                     name: "encrypted-host".to_string(),
                     address: "192.0.2.20".to_string(),
                     region: String::new(),
+                    expires_at: None,
                     ssh_user: "root".to_string(),
                     ssh_port: 22,
+                    ssh_auth_type: SshAuthType::Password,
+                    ssh_key_id: None,
                     ssh_password: "test-secret".to_string(),
                     tags: Vec::new(),
                 },
@@ -1289,6 +1877,97 @@ mod tests {
             db.ssh_credentials(host.id).unwrap().unwrap().0,
             "test-secret"
         );
+
+        drop(db);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn switches_host_between_password_and_key_authentication() {
+        let path =
+            std::env::temp_dir().join(format!("lightmonitor-auth-switch-{}.db", Uuid::new_v4()));
+        let db = Db::open(&path).unwrap();
+        let key_id = Uuid::new_v4();
+        let key_path = std::env::temp_dir()
+            .join(format!("lightmonitor-auth-key-{}", Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
+        db.create_ssh_key(key_id, "switch-key", &key_path, 42)
+            .unwrap();
+
+        let host = db
+            .create_host(
+                CreateHostRequest {
+                    name: "auth-host".to_string(),
+                    address: "192.0.2.50".to_string(),
+                    region: String::new(),
+                    expires_at: None,
+                    ssh_user: "root".to_string(),
+                    ssh_port: 22,
+                    ssh_auth_type: SshAuthType::Key,
+                    ssh_key_id: Some(key_id),
+                    ssh_password: "must-not-be-stored".to_string(),
+                    tags: Vec::new(),
+                },
+                "auth-switch-token".to_string(),
+            )
+            .unwrap();
+        assert_eq!(host.ssh_auth_type, SshAuthType::Key);
+        assert_eq!(host.ssh_key_id, Some(key_id));
+        assert!(!host.has_ssh_password);
+        assert!(host.has_ssh_identity);
+
+        let host = db
+            .update_host(
+                host.id,
+                UpdateHostRequest {
+                    name: host.name.clone(),
+                    address: host.address.clone(),
+                    region: host.region.clone(),
+                    expires_at: None,
+                    ssh_user: host.ssh_user.clone(),
+                    ssh_port: host.ssh_port,
+                    ssh_auth_type: SshAuthType::Password,
+                    ssh_key_id: None,
+                    ssh_password: "new-secret".to_string(),
+                    clear_ssh_password: false,
+                    tags: Vec::new(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.ssh_auth_type, SshAuthType::Password);
+        assert_eq!(host.ssh_key_id, None);
+        assert!(host.has_ssh_password);
+        assert!(!host.has_ssh_identity);
+        assert_eq!(
+            db.ssh_credentials(host.id).unwrap().unwrap().0,
+            "new-secret"
+        );
+
+        let host = db
+            .update_host(
+                host.id,
+                UpdateHostRequest {
+                    name: host.name.clone(),
+                    address: host.address.clone(),
+                    region: host.region.clone(),
+                    expires_at: None,
+                    ssh_user: host.ssh_user.clone(),
+                    ssh_port: host.ssh_port,
+                    ssh_auth_type: SshAuthType::Key,
+                    ssh_key_id: Some(key_id),
+                    ssh_password: String::new(),
+                    clear_ssh_password: false,
+                    tags: Vec::new(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.ssh_auth_type, SshAuthType::Key);
+        assert_eq!(host.ssh_key_id, Some(key_id));
+        assert!(!host.has_ssh_password);
+        assert_eq!(db.ssh_credentials(host.id).unwrap().unwrap().0, "");
 
         drop(db);
         cleanup(&path);

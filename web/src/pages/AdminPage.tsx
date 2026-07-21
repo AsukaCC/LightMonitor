@@ -11,6 +11,7 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
+  Globe2,
   HardDrive,
   Copy,
   KeyRound,
@@ -19,15 +20,16 @@ import {
   LoaderCircle,
   LogOut,
   MemoryStick,
-  Network,
   Plus,
   PackageSearch,
   RefreshCw,
   RotateCcw,
   Server,
+  ShieldCheck,
   Terminal,
   Trash2,
   TriangleAlert,
+  Upload,
   Wifi,
   X,
 } from 'lucide-react'
@@ -35,15 +37,18 @@ import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as d3 from 'd3'
 import {
+  addHostDomain,
   applyRelease,
   authFetch,
   deleteDownloadedRelease,
+  deleteHostDomain,
   fetchHosts,
   fetchReleaseCatalog,
   fetchSshKeys,
   fetchSession,
   login,
   logout,
+  probeHost,
   tokenStorageKey,
   userStorageKey,
 } from '../api'
@@ -55,10 +60,15 @@ import { translate, useI18n } from '../i18n'
 import type { Host, HostForm, MetricHistoryResponse, ReleaseCatalog, ServerEvent, SshKey, ThemeMode } from '../types'
 import { statusLabel } from '../types'
 import {
+  daysUntil,
   formatBytes,
   formatCpuDetail,
   formatDuration,
+  formatDate,
+  formatLatency,
   formatLoad,
+  formatNetworkRate,
+  formatPacketLoss,
   formatRelativeTime,
   formatUsageDetail,
   isStaleHost,
@@ -71,7 +81,6 @@ type ActiveView = 'dashboard' | 'hosts' | 'versions' | 'keys'
 type HostModalMode = 'create' | 'edit'
 type HostFilter = 'all' | 'online' | 'offline' | 'never' | 'installing'
 type InstallPhase = 'idle' | 'installing' | 'success' | 'error'
-type InstallAuth = 'saved' | 'identity' | 'password' | 'key'
 type HistoryRange = '1h' | '4h' | '6h' | '12h' | '1d'
 type HistoryView = 'resources' | 'network' | 'load'
 type DeleteFallback = { ids: string[]; message: string }
@@ -81,8 +90,11 @@ const initialForm: HostForm = {
   address: '',
   ssh_user: '',
   ssh_port: '22',
+  ssh_auth_type: 'password',
+  ssh_key_id: '',
   ssh_password: '',
   clear_ssh_password: false,
+  expires_at: '',
   tags: '',
 }
 
@@ -120,9 +132,6 @@ export function AdminPage({
   const [copiedItem, setCopiedItem] = useState<string>()
   const [hostPage, setHostPage] = useState(1)
   const [form, setForm] = useState<HostForm>(initialForm)
-  const [installKeyId, setInstallKeyId] = useState('')
-  const [installPassword, setInstallPassword] = useState('')
-  const [installAuth, setInstallAuth] = useState<InstallAuth>('password')
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginPasswordVisible, setLoginPasswordVisible] = useState(false)
   const [sshKeys, setSshKeys] = useState<SshKey[]>([])
@@ -333,14 +342,14 @@ export function AdminPage({
         const prev = existing.latest
         const curr = nextHost.latest
         const elapsed = (new Date(curr.collected_at).getTime() - new Date(prev.collected_at).getTime()) / 1000
-        if (elapsed > 0.5) {
+        if ((curr.network_rx_rate === undefined || curr.network_tx_rate === undefined) && elapsed > 0.5) {
           const rxDelta = curr.network_rx_bytes >= prev.network_rx_bytes ? curr.network_rx_bytes - prev.network_rx_bytes : 0
           const txDelta = curr.network_tx_bytes >= prev.network_tx_bytes ? curr.network_tx_bytes - prev.network_tx_bytes : 0
-          curr.network_rx_rate = rxDelta / elapsed
-          curr.network_tx_rate = txDelta / elapsed
-        } else {
-          curr.network_rx_rate = prev.network_rx_rate
-          curr.network_tx_rate = prev.network_tx_rate
+          curr.network_rx_rate ??= rxDelta / elapsed
+          curr.network_tx_rate ??= txDelta / elapsed
+        } else if (elapsed <= 0.5) {
+          curr.network_rx_rate ??= prev.network_rx_rate
+          curr.network_tx_rate ??= prev.network_tx_rate
         }
       }
       const exists = current.some((host) => host.id === nextHost.id)
@@ -371,8 +380,11 @@ export function AdminPage({
       address: host.address,
       ssh_user: host.ssh_user,
       ssh_port: String(host.ssh_port),
+      ssh_auth_type: host.ssh_auth_type,
+      ssh_key_id: host.ssh_key_id ?? '',
       ssh_password: '',
       clear_ssh_password: false,
+      expires_at: host.expires_at?.slice(0, 10) ?? '',
       tags: host.tags.join(', '),
     })
     setEditingHostId(host.id)
@@ -406,9 +418,6 @@ export function AdminPage({
   function openInstallModal(host: Host) {
     if (host.is_system) return
     setInstallHostId(host.id)
-    setInstallAuth(host.has_ssh_identity ? 'identity' : host.has_ssh_password ? 'saved' : 'password')
-    setInstallPassword('')
-    setInstallKeyId(sshKeys[0]?.id ?? '')
     setInstallPhase(host.status === 'installing' ? 'installing' : 'idle')
     setInstallError('')
     setManualInstallOpen(false)
@@ -421,8 +430,6 @@ export function AdminPage({
   function closeInstallModal() {
     if (installPhase === 'installing') return
     setInstallHostId(undefined)
-    setInstallPassword('')
-    setInstallKeyId('')
     setTokenInfo(undefined)
     setManualInstallOpen(false)
     setInstallError('')
@@ -481,8 +488,11 @@ export function AdminPage({
             region: '',
             ssh_user: form.ssh_user.trim(),
             ssh_port: Number(form.ssh_port || 22),
-            ssh_password: form.ssh_password,
+            ssh_auth_type: form.ssh_auth_type,
+            ssh_key_id: form.ssh_auth_type === 'key' ? form.ssh_key_id : null,
+            ssh_password: form.ssh_auth_type === 'password' ? form.ssh_password : '',
             clear_ssh_password: form.clear_ssh_password,
+            expires_at: form.expires_at ? `${form.expires_at}T23:59:59Z` : null,
             tags: form.tags
               .split(',')
               .map((tag) => tag.trim())
@@ -543,23 +553,12 @@ export function AdminPage({
     setInstallPhase('installing')
     setInstallError('')
     try {
-      if (installAuth === 'password' && !installPassword.trim()) {
-        throw new Error(t('请填写 SSH 密码'))
-      }
-      if (installAuth === 'key' && !installKeyId) {
-        throw new Error(t('请选择 SSH 私钥'))
-      }
       const response = await authFetch(
         `/api/hosts/${installHostId}/install-agent`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ssh_key_path: '',
-            ssh_key_id: installAuth === 'key' ? installKeyId : undefined,
-            ssh_password: installAuth === 'password' ? installPassword : '',
-            use_saved_identity: installAuth === 'identity',
-          }),
+          body: JSON.stringify({}),
         },
         token,
         clearSession,
@@ -842,6 +841,8 @@ export function AdminPage({
                             </h3>
                             <p className="dashboard-host-meta">
                               {host.address} · {host.region || t('未设置地区')} · {formatRelativeTime(host.last_seen)}
+                              {host.resolved_ipv4.length > 0 && <span className="ip-family">IPv4</span>}
+                              {host.resolved_ipv6.length > 0 && <span className="ip-family">IPv6</span>}
                             </p>
                           </div>
                         </div>
@@ -942,6 +943,7 @@ export function AdminPage({
                     <th>{t('名称')}</th>
                     <th>{t('地区')}</th>
                     <th>{t('地址')}</th>
+                    <th>{t('服务器到期')}</th>
                     <th>{t('探针')}</th>
                     <th>{t('最后上报')}</th>
                     <th>{t('数据更新')}</th>
@@ -987,7 +989,18 @@ export function AdminPage({
                           </div>
                         </td>
                         <td data-label={t('地区')}>{host.region || '-'}</td>
-                        <td className="mono" data-label={t('地址')}>{host.address}</td>
+                        <td className="mono" data-label={t('地址')}>
+                          <div className="host-address-cell">
+                            <span>{host.address}</span>
+                            <span className="ip-families">
+                              {host.resolved_ipv4.length > 0 && <i>IPv4</i>}
+                              {host.resolved_ipv6.length > 0 && <i>IPv6</i>}
+                            </span>
+                          </div>
+                        </td>
+                        <td data-label={t('服务器到期')}>
+                          <span className={expiryTone(host.expires_at)}>{formatExpirySummary(host.expires_at, t)}</span>
+                        </td>
                         <td data-label={t('探针')}>
                           <span className={`conn-pill ${connected ? 'on' : 'off'}`}>
                             {connected ? <Link2 size={13} /> : <Link2Off size={13} />}
@@ -1083,8 +1096,10 @@ export function AdminPage({
         ) : (
           <SshKeyPanel
             error={sshKeysError}
+            hosts={hosts}
             keys={sshKeys}
             loading={sshKeysLoading}
+            onHostsReload={loadHosts}
             onReload={loadSshKeys}
             onUnauthorized={clearSession}
             token={token}
@@ -1204,7 +1219,17 @@ export function AdminPage({
                   token={token}
                 />
               ) : (
-                <HostDetailContent host={detailHost} tab={detailTab} />
+                <>
+                  <HostDetailContent host={detailHost} tab={detailTab} />
+                  {detailTab === 'info' && (
+                    <HostDomainsPanel
+                      host={detailHost}
+                      onHostUpdated={upsertHost}
+                      onUnauthorized={clearSession}
+                      token={token}
+                    />
+                  )}
+                </>
               )}
             </div>
             <div className="modal-actions">
@@ -1317,23 +1342,71 @@ export function AdminPage({
                     onChange={(e) => setForm((current) => ({ ...current, ssh_user: e.target.value }))}
                   />
                 </label>
-                <label className="wide">
-                  {t('SSH 密码（可选）')}
+                <label>
+                  {t('服务器到期时间')}
                   <input
-                    autoComplete="new-password"
-                    type="password"
-                    placeholder={
-                      hostModalMode === 'edit'
-                        ? t('留空保持不变；填写则更新')
-                        : t('用于远程安装探针（可选，可稍后填写）')
-                    }
-                    value={form.ssh_password}
-                    onChange={(e) =>
-                      setForm((current) => ({ ...current, ssh_password: e.target.value, clear_ssh_password: false }))
-                    }
+                    type="date"
+                    value={form.expires_at}
+                    onChange={(e) => setForm((current) => ({ ...current, expires_at: e.target.value }))}
                   />
                 </label>
-                {hostModalMode === 'edit' && (
+                <div className="wide auth-type-field">
+                  <span>{t('连接方式')}</span>
+                  <div className="filter-tabs auth-type-tabs" role="group" aria-label={t('连接方式')}>
+                    <button
+                      className={form.ssh_auth_type === 'password' ? 'active' : ''}
+                      onClick={() => setForm((current) => ({ ...current, ssh_auth_type: 'password', ssh_key_id: '' }))}
+                      type="button"
+                    >
+                      {t('账户密码')}
+                    </button>
+                    <button
+                      className={form.ssh_auth_type === 'key' ? 'active' : ''}
+                      onClick={() => setForm((current) => ({
+                        ...current,
+                        ssh_auth_type: 'key',
+                        ssh_key_id: current.ssh_key_id || sshKeys[0]?.id || '',
+                        ssh_password: '',
+                        clear_ssh_password: false,
+                      }))}
+                      type="button"
+                    >
+                      {t('SSH 密钥')}
+                    </button>
+                  </div>
+                </div>
+                {form.ssh_auth_type === 'password' ? (
+                  <label className="wide">
+                    {t('SSH 密码（可选）')}
+                    <input
+                      autoComplete="new-password"
+                      type="password"
+                      placeholder={
+                        hostModalMode === 'edit'
+                          ? t('留空保持不变；填写则更新')
+                          : t('用于远程安装探针（可选，可稍后填写）')
+                      }
+                      value={form.ssh_password}
+                      onChange={(e) =>
+                        setForm((current) => ({ ...current, ssh_password: e.target.value, clear_ssh_password: false }))
+                      }
+                    />
+                  </label>
+                ) : (
+                  <label className="wide">
+                    {t('SSH 密钥')}
+                    <select
+                      required
+                      value={form.ssh_key_id}
+                      onChange={(e) => setForm((current) => ({ ...current, ssh_key_id: e.target.value }))}
+                    >
+                      <option value="">{t('请选择用于此主机的密钥')}</option>
+                      {sshKeys.map((key) => <option key={key.id} value={key.id}>{key.name}</option>)}
+                    </select>
+                    {sshKeys.length === 0 && <span className="copy-help">{t('请先在密钥管理中上传私钥')}</span>}
+                  </label>
+                )}
+                {hostModalMode === 'edit' && form.ssh_auth_type === 'password' && (
                   <label className="wide checkbox-row">
                     <input
                       checked={form.clear_ssh_password}
@@ -1422,77 +1495,28 @@ export function AdminPage({
                 </div>
               ) : null}
 
-              <div className="filter-tabs">
-                {installHost?.has_ssh_password && (
-                  <button
-                    className={installAuth === 'saved' ? 'active' : ''}
-                    disabled={installPhase === 'installing'}
-                    onClick={() => setInstallAuth('saved')}
-                    type="button"
-                  >
-                    {t('使用已保存密码')}
-                  </button>
+              <div className="install-auth-summary">
+                <div>
+                  <span className="muted small">{t('连接方式')}</span>
+                  <strong>{installHost?.ssh_auth_type === 'key' ? t('SSH 密钥') : t('账户密码')}</strong>
+                </div>
+                <div>
+                  <span className="muted small">{t('SSH 账户')}</span>
+                  <strong className="mono">{installHost?.ssh_user || t('未设置')}</strong>
+                </div>
+                {installHost?.ssh_auth_type === 'key' && (
+                  <div>
+                    <span className="muted small">{t('SSH 密钥')}</span>
+                    <strong>{installHost.ssh_key_name || t('未设置')}</strong>
+                  </div>
                 )}
-                {installHost?.has_ssh_identity && (
-                  <button
-                    className={installAuth === 'identity' ? 'active' : ''}
-                    disabled={installPhase === 'installing'}
-                    onClick={() => setInstallAuth('identity')}
-                    type="button"
-                  >
-                    {t('使用已保存身份文件')}
-                  </button>
-                )}
-                <button
-                  className={installAuth === 'password' ? 'active' : ''}
-                  disabled={installPhase === 'installing'}
-                  onClick={() => setInstallAuth('password')}
-                  type="button"
-                >
-                  {t('临时密码')}
-                </button>
-                <button
-                  className={installAuth === 'key' ? 'active' : ''}
-                  disabled={installPhase === 'installing'}
-                  onClick={() => setInstallAuth('key')}
-                  type="button"
-                >
-                  {t('密钥登录')}
-                </button>
               </div>
-              {installAuth === 'saved' && (
-                <p className="muted small">{t('将使用该主机已保存的 SSH 密码安装探针。')}</p>
-              )}
-              {installAuth === 'identity' && (
-                <p className="muted small">{t('将使用该主机已保存的 SSH 身份文件安装探针。')}</p>
-              )}
-              {installAuth === 'password' && (
-                <label>
-                  {t('SSH 密码')}
-                  <input
-                    autoComplete="new-password"
-                    disabled={installPhase === 'installing'}
-                    required
-                    type="password"
-                    value={installPassword}
-                    onChange={(e) => setInstallPassword(e.target.value)}
-                    placeholder={t('目标机 root/用户 登录密码')}
-                  />
-                </label>
-              )}
-              {installAuth === 'key' && (
-                <label>
-                  {t('服务器 SSH 私钥')}
-                  <select
-                    required
-                    value={installKeyId}
-                    onChange={(e) => setInstallKeyId(e.target.value)}
-                  >
-                    <option value="">{t('请选择 SSH 私钥')}</option>
-                    {sshKeys.map((key) => <option key={key.id} value={key.id}>{key.name}</option>)}
-                  </select>
-                  {sshKeys.length === 0 && <span className="copy-help">{t('请先在密钥管理中上传私钥')}</span>}
-                </label>
+              {installHost && (
+                (installHost.ssh_auth_type === 'password' && !installHost.has_ssh_password)
+                || (installHost.ssh_auth_type === 'key' && !installHost.has_ssh_identity)
+                || !installHost.ssh_user
+              ) && (
+                <div className="banner error">{t('当前主机缺少可用的 SSH 登录配置，请先编辑主机。')}</div>
               )}
               {installPhase === 'error' && !installError && <div className="banner error">{t('安装失败，请重试')}</div>}
 
@@ -1558,7 +1582,16 @@ export function AdminPage({
                 {installPhase === 'success' ? t('完成') : t('取消')}
               </button>
               {installPhase !== 'success' && (
-                <button className="btn primary" disabled={installPhase === 'installing'} type="submit">
+                <button
+                  className="btn primary"
+                  disabled={
+                    installPhase === 'installing'
+                    || !installHost?.ssh_user
+                    || (installHost.ssh_auth_type === 'password' && !installHost.has_ssh_password)
+                    || (installHost.ssh_auth_type === 'key' && !installHost.has_ssh_identity)
+                  }
+                  type="submit"
+                >
                   {installPhase === 'installing' && <LoaderCircle className="spin" size={15} />}
                   {installPhase === 'installing' ? t('安装中') : installPhase === 'error' ? t('重新安装') : t('开始安装')}
                 </button>
@@ -1887,14 +1920,20 @@ function HostHistoryPanel({
       const elapsed = previousAt ? Math.max(1, (at.getTime() - previousAt.getTime()) / 1000) : 1
       const rxDelta = previous ? point.network_rx_bytes - previous.network_rx_bytes : 0
       const txDelta = previous ? point.network_tx_bytes - previous.network_tx_bytes : 0
+      const storedRxRate = point.network_rx_rate
+      const storedTxRate = point.network_tx_rate
       return {
         at,
         cpu: point.cpu_percent,
         memory: point.memory_percent,
         disk: point.disk_percent,
         load: point.load_one,
-        rxRate: Math.max(0, rxDelta) / elapsed / 1024,
-        txRate: Math.max(0, txDelta) / elapsed / 1024,
+        rxRate: typeof storedRxRate === 'number' && Number.isFinite(storedRxRate)
+          ? storedRxRate / 1024
+          : Math.max(0, rxDelta) / elapsed / 1024,
+        txRate: typeof storedTxRate === 'number' && Number.isFinite(storedTxRate)
+          ? storedTxRate / 1024
+          : Math.max(0, txDelta) / elapsed / 1024,
       }
     })
   }, [history])
@@ -2087,69 +2126,76 @@ function formatHistoryValue(value: number, view: HistoryView) {
 
 function HostMetricSummary({ host }: { host: Host }) {
   const { t } = useI18n()
-  if (!host.latest) {
-    return <div className="dashboard-host-empty">{t('等待探针上报实时指标')}</div>
-  }
-
-  const sample = host.latest!
-  const memoryPercent = percent(sample.memory_used_bytes, sample.memory_total_bytes)
-  const disk = sample.disks[0]
+  const sample = host.latest
+  const memoryPercent = sample ? percent(sample.memory_used_bytes, sample.memory_total_bytes) : 0
+  const disk = sample?.disks[0]
   const diskPercent = disk ? percent(disk.total_bytes - disk.available_bytes, disk.total_bytes) : 0
-  const rxRate =
-    sample.network_rx_rate !== undefined ? ` (${formatBytes(sample.network_rx_rate)}/s)` : ''
-  const txRate =
-    sample.network_tx_rate !== undefined ? ` (${formatBytes(sample.network_tx_rate)}/s)` : ''
 
   return (
     <div className="dashboard-host-metrics">
-      <div className="dashboard-host-resources">
-        <MetricBar
-          icon={<Cpu size={15} />}
-          name="CPU"
-          detail={formatCpuDetail(sample.cpu_percent, sample.cpu_cores)}
-          value={sample.cpu_percent}
-          tone="cpu"
-        />
-        <MetricBar
-          icon={<MemoryStick size={15} />}
-          name={t('内存')}
-          detail={formatUsageDetail(sample.memory_used_bytes, sample.memory_total_bytes)}
-          value={memoryPercent}
-          tone="mem"
-        />
-        <MetricBar
-          icon={<HardDrive size={15} />}
-          name={t('磁盘')}
-          detail={
-            disk
-              ? formatUsageDetail(disk.total_bytes - disk.available_bytes, disk.total_bytes)
-              : t('磁盘 无数据')
-          }
-          value={diskPercent}
-          tone="disk"
-        />
-      </div>
-      <div className="dashboard-host-live">
-        <div className="live-stat">
-          <span className="live-stat-label">
-            <Network size={14} />
-            {t('接收')}
-          </span>
-          <strong className="live-stat-value">
-            {formatBytes(sample.network_rx_bytes)}
-            {rxRate}
+      {sample ? (
+        <>
+          <div className="dashboard-host-resources">
+            <MetricBar
+              icon={<Cpu size={15} />}
+              name="CPU"
+              detail={formatCpuDetail(sample.cpu_percent, sample.cpu_cores)}
+              value={sample.cpu_percent}
+              tone="cpu"
+            />
+            <MetricBar
+              icon={<MemoryStick size={15} />}
+              name={t('内存')}
+              detail={formatUsageDetail(sample.memory_used_bytes, sample.memory_total_bytes)}
+              value={memoryPercent}
+              tone="mem"
+            />
+            <MetricBar
+              icon={<HardDrive size={15} />}
+              name={t('磁盘')}
+              detail={disk ? formatUsageDetail(disk.total_bytes - disk.available_bytes, disk.total_bytes) : t('磁盘 无数据')}
+              value={diskPercent}
+              tone="disk"
+            />
+          </div>
+          <div className="dashboard-host-live">
+            <div className="live-stat">
+              <span className="live-stat-label"><Download size={14} />{t('下行网速')}</span>
+              <strong className="live-stat-value">{formatNetworkRate(sample.network_rx_rate)}</strong>
+              <span className="live-stat-detail">{t('累计接收')} {formatBytes(sample.network_rx_bytes)}</span>
+            </div>
+            <div className="live-stat">
+              <span className="live-stat-label"><Upload size={14} />{t('上行网速')}</span>
+              <strong className="live-stat-value">{formatNetworkRate(sample.network_tx_rate)}</strong>
+              <span className="live-stat-detail">{t('累计发送')} {formatBytes(sample.network_tx_bytes)}</span>
+            </div>
+            <div className="live-stat">
+              <span className="live-stat-label">{t('负载')}</span>
+              <strong className="live-stat-value">{formatLoad(sample.load_average)}</strong>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="dashboard-host-empty">{t('等待探针上报实时指标')}</div>
+      )}
+      <div className="dashboard-host-probe">
+        <div className="live-stat compact">
+          <span className="live-stat-label">{t('访问延迟')}</span>
+          <strong className="live-stat-value">{formatLatency(host.latency_ms)}</strong>
+        </div>
+        <div className="live-stat compact">
+          <span className="live-stat-label">{t('丢包率')}</span>
+          <strong className="live-stat-value">{formatPacketLoss(host.packet_loss_percent)}</strong>
+        </div>
+        <div className="live-stat compact">
+          <span className="live-stat-label">{t('服务器到期')}</span>
+          <strong className={`live-stat-value ${expiryTone(host.expires_at)}`}>
+            {formatExpirySummary(host.expires_at, t)}
           </strong>
         </div>
-        <div className="live-stat">
-          <span className="live-stat-label">{t('发送')}</span>
-          <strong className="live-stat-value">
-            {formatBytes(sample.network_tx_bytes)}
-            {txRate}
-          </strong>
-        </div>
-        <div className="live-stat">
-          <span className="live-stat-label">{t('负载')}</span>
-          <strong className="live-stat-value">{formatLoad(sample.load_average)}</strong>
+        <div className="live-stat compact">
+          <span className="live-stat-label">{t('域名')}</span>
+          <strong className="live-stat-value">{host.domains.length}</strong>
         </div>
       </div>
     </div>
@@ -2169,10 +2215,19 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
             <DetailValue label={t('状态')} value={statusLabel(host.status)} />
             <DetailValue label={t('IP / 域名')} value={host.address} mono />
             <DetailValue label={t('地区')} value={host.region || t('未识别')} />
+            <DetailValue label={t('服务器到期时间')} value={formatExpirySummary(host.expires_at, t)} />
+            <DetailValue label={t('访问延迟')} value={formatLatency(host.latency_ms)} />
+            <DetailValue label={t('丢包率')} value={formatPacketLoss(host.packet_loss_percent)} />
+            <DetailValue label="IPv4" value={formatIpList(host.resolved_ipv4)} mono />
+            <DetailValue label="IPv6" value={formatIpList(host.resolved_ipv6)} mono />
+            <DetailValue label={t('最近探测')} value={host.last_probed_at ? new Date(host.last_probed_at).toLocaleString(language) : '-'} />
             <DetailValue label="SSH" value={`${host.ssh_user || t('未设置')} @ ${host.ssh_port}`} mono />
             <DetailValue label={t('数据更新')} value={formatUpdateInterval(host.update_interval_seconds)} />
-            <DetailValue label={t('SSH 密码')} value={host.has_ssh_password ? t('已保存') : t('未保存')} />
-            <DetailValue label={t('SSH 身份文件')} value={host.has_ssh_identity ? t('已保存') : t('未保存')} />
+            <DetailValue label={t('连接方式')} value={host.ssh_auth_type === 'key' ? t('SSH 密钥') : t('账户密码')} />
+            <DetailValue
+              label={host.ssh_auth_type === 'key' ? t('SSH 密钥') : t('SSH 密码')}
+              value={host.ssh_auth_type === 'key' ? (host.ssh_key_name || t('未设置')) : (host.has_ssh_password ? t('已保存') : t('未保存'))}
+            />
             <DetailValue label={t('最后上报')} value={host.last_seen ? new Date(host.last_seen).toLocaleString(language) : t('从未上报')} />
             <DetailValue label={t('探针 ID')} value={host.agent_id || t('未注册')} mono />
             <DetailValue label={t('创建时间')} value={new Date(host.created_at).toLocaleString(language)} />
@@ -2247,12 +2302,20 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
               <h4>{t('网络流量')}</h4>
               <div className="detail-grid">
                 <DetailValue
+                  label={t('下行网速')}
+                  value={formatNetworkRate(sample.network_rx_rate)}
+                />
+                <DetailValue
+                  label={t('上行网速')}
+                  value={formatNetworkRate(sample.network_tx_rate)}
+                />
+                <DetailValue
                   label={t('累计接收')}
-                  value={`${formatBytes(sample.network_rx_bytes)}${sample.network_rx_rate !== undefined ? ` (${formatBytes(sample.network_rx_rate)}/s)` : ''}`}
+                  value={formatBytes(sample.network_rx_bytes)}
                 />
                 <DetailValue
                   label={t('累计发送')}
-                  value={`${formatBytes(sample.network_tx_bytes)}${sample.network_tx_rate !== undefined ? ` (${formatBytes(sample.network_tx_rate)}/s)` : ''}`}
+                  value={formatBytes(sample.network_tx_bytes)}
                 />
               </div>
             </section>
@@ -2308,6 +2371,162 @@ function HostDetailContent({ host, tab }: { host: Host; tab: 'info' | 'load' | '
       </section>
     </div>
   )
+}
+
+function HostDomainsPanel({
+  host,
+  token,
+  onUnauthorized,
+  onHostUpdated,
+}: {
+  host: Host
+  token: string
+  onUnauthorized: () => void
+  onHostUpdated: (host: Host) => void
+}) {
+  const { language, t } = useI18n()
+  const [domain, setDomain] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submitDomain(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!domain.trim()) return
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await addHostDomain(host.id, domain.trim(), token, onUnauthorized)
+      onHostUpdated(updated)
+      setDomain('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('域名添加失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function refreshProbe() {
+    setBusy(true)
+    setError('')
+    try {
+      onHostUpdated(await probeHost(host.id, token, onUnauthorized))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('探测刷新失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeDomain(domainId: string, name: string) {
+    if (!window.confirm(t('确认删除域名 {domain}？', { domain: name }))) return
+    setBusy(true)
+    setError('')
+    try {
+      onHostUpdated(await deleteHostDomain(host.id, domainId, token, onUnauthorized))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('域名删除失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="detail-section domain-section">
+      <div className="domain-section-head">
+        <div>
+          <h4>{t('域名与 SSL 证书')}</h4>
+          <span className="muted small">{t('{count} 个域名', { count: host.domains.length })}</span>
+        </div>
+        <button
+          className="icon-btn"
+          disabled={busy}
+          onClick={() => void refreshProbe()}
+          title={t('立即探测')}
+          type="button"
+        >
+          <RefreshCw className={busy ? 'spin' : ''} size={15} />
+        </button>
+      </div>
+      <form className="domain-add-row" onSubmit={submitDomain}>
+        <input
+          disabled={busy}
+          placeholder={t('域名或 HTTPS URL')}
+          value={domain}
+          onChange={(event) => setDomain(event.target.value)}
+        />
+        <button className="btn secondary" disabled={busy || !domain.trim()} type="submit">
+          <Plus size={15} />
+          {t('添加域名')}
+        </button>
+      </form>
+      {error && <div className="banner error">{error}</div>}
+      {host.probe_error && <div className="probe-error">{host.probe_error}</div>}
+      <div className="domain-list">
+        {host.domains.map((item) => (
+          <div className="domain-row" key={item.id}>
+            <div className="domain-row-head">
+              <div className="domain-name">
+                <Globe2 size={15} />
+                <strong>{item.domain}{item.port === 443 ? '' : `:${item.port}`}</strong>
+              </div>
+              <div className="domain-actions">
+                <span className={`ssl-status ${item.ssl_status}`}>{t(sslStatusLabel(item.ssl_status))}</span>
+                <button
+                  className="icon-btn danger"
+                  disabled={busy}
+                  onClick={() => void removeDomain(item.id, item.domain)}
+                  title={t('删除域名')}
+                  type="button"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+            <div className="domain-metrics">
+              <span><ShieldCheck size={13} /> {t('SSL 到期')} <strong>{formatExpirySummary(item.ssl_expires_at, t)}</strong></span>
+              <span>{t('访问延迟')} <strong>{formatLatency(item.latency_ms)}</strong></span>
+              <span>{t('丢包率')} <strong>{formatPacketLoss(item.packet_loss_percent)}</strong></span>
+              <span>{t('最近检查')} <strong>{item.last_checked_at ? new Date(item.last_checked_at).toLocaleString(language) : '-'}</strong></span>
+            </div>
+            <div className="domain-addresses">
+              <span>IPv4 <code>{formatIpList(item.resolved_ipv4)}</code></span>
+              <span>IPv6 <code>{formatIpList(item.resolved_ipv6)}</code></span>
+            </div>
+            {item.last_error && <div className="probe-error">{item.last_error}</div>}
+          </div>
+        ))}
+        {host.domains.length === 0 && <div className="empty-inline">{t('暂无域名')}</div>}
+      </div>
+    </section>
+  )
+}
+
+function sslStatusLabel(status: Host['domains'][number]['ssl_status']) {
+  if (status === 'valid') return '证书有效'
+  if (status === 'expiring') return '证书即将到期'
+  if (status === 'expired') return '证书已过期'
+  if (status === 'unavailable') return '证书不可用'
+  return '等待探测'
+}
+
+function formatIpList(addresses: string[]) {
+  return addresses.length ? addresses.join(', ') : '-'
+}
+
+function expiryTone(iso?: string) {
+  const days = daysUntil(iso)
+  if (days === undefined) return ''
+  if (days < 0) return 'danger-text'
+  if (days <= 30) return 'warn-text'
+  return ''
+}
+
+function formatExpirySummary(iso: string | undefined, t: ReturnType<typeof useI18n>['t']) {
+  const days = daysUntil(iso)
+  if (days === undefined) return '-'
+  if (days < 0) return t('已过期 {count} 天', { count: Math.abs(days) })
+  if (days === 0) return t('今天到期')
+  return t('{date}（剩余 {count} 天）', { date: formatDate(iso), count: days })
 }
 
 function DetailValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

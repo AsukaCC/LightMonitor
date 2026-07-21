@@ -1,10 +1,11 @@
 use crate::auth::{ApiError, AuthUser, random_token};
 use crate::models::{
     AgentConfigResponse, AgentTokenResponse, ApplyReleaseRequest, ApplyReleaseResponse,
-    CreateHostRequest, DeleteHostsRequest, Host, HostStatus, InstallAgentRequest, InstallLog,
-    LoginRequest, LoginResponse, MetricHistoryQuery, MetricHistoryResponse, MetricReport,
-    RegisterAgentRequest, RegisterAgentResponse, ReleaseCatalog, ServerEvent, SessionResponse,
-    SshKey, UpdateHostIntervalRequest, UpdateHostRequest,
+    AssignSshKeyHostsRequest, CreateHostDomainRequest, CreateHostRequest, DeleteHostsRequest, Host,
+    HostStatus, InstallAgentRequest, InstallLog, LoginRequest, LoginResponse, MetricHistoryQuery,
+    MetricHistoryResponse, MetricReport, RegisterAgentRequest, RegisterAgentResponse,
+    ReleaseCatalog, ServerEvent, SessionResponse, SshKey, UpdateHostIntervalRequest,
+    UpdateHostRequest,
 };
 use crate::state::AppState;
 use axum::Json;
@@ -297,6 +298,38 @@ pub async fn delete_ssh_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn assign_ssh_key_hosts(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<AssignSshKeyHostsRequest>,
+) -> Result<Json<SshKey>, ApiError> {
+    let hosts = state
+        .db
+        .assign_ssh_key_hosts(id, &body.host_ids)
+        .map_err(|error| {
+            let message = error.to_string();
+            if message.contains("not found") {
+                ApiError::not_found(message)
+            } else {
+                ApiError::bad_request(message)
+            }
+        })?;
+    for host in hosts {
+        state.publish(ServerEvent::HostUpdated {
+            host: Box::new(host),
+        });
+    }
+    let key = state
+        .db
+        .list_ssh_keys()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .into_iter()
+        .find(|key| key.id == id)
+        .ok_or_else(|| ApiError::not_found("SSH key not found"))?;
+    Ok(Json(key))
+}
+
 async fn read_ssh_key_upload(
     mut multipart: Multipart,
 ) -> Result<(Option<String>, Option<String>, Vec<u8>), ApiError> {
@@ -366,11 +399,26 @@ pub async fn create_host(
     if body.region.is_empty() {
         body.region = crate::geo::resolve_region(&body.address).await;
     }
+    let address = body.address.clone();
     let agent_token = random_token();
-    let host = state
+    let mut host = state
         .db
         .create_host(body, agent_token)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    if let Some(target) = crate::probe::domain_from_host_address(&address) {
+        host = state
+            .db
+            .add_host_domain(
+                host.id,
+                CreateHostDomainRequest {
+                    domain: target.domain,
+                    port: target.port,
+                },
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .unwrap_or(host);
+    }
+    queue_host_probe(state.clone(), host.clone());
     state.publish(ServerEvent::HostUpdated {
         host: Box::new(host.clone()),
     });
@@ -388,15 +436,102 @@ pub async fn update_host(
     if body.region.is_empty() {
         body.region = crate::geo::resolve_region(&body.address).await;
     }
-    let host = state
+    let address = body.address.clone();
+    let mut host = state
         .db
         .update_host(id, body)
-        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("host not found"))?;
+    if let Some(target) = crate::probe::domain_from_host_address(&address) {
+        host = state
+            .db
+            .add_host_domain(
+                host.id,
+                CreateHostDomainRequest {
+                    domain: target.domain,
+                    port: target.port,
+                },
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .unwrap_or(host);
+    }
+    queue_host_probe(state.clone(), host.clone());
     state.publish(ServerEvent::HostUpdated {
         host: Box::new(host.clone()),
     });
     Ok(Json(host))
+}
+
+pub async fn add_host_domain(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateHostDomainRequest>,
+) -> Result<Json<Host>, ApiError> {
+    let target = crate::probe::parse_domain_target(&body.domain, body.port)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let host = state
+        .db
+        .add_host_domain(
+            id,
+            CreateHostDomainRequest {
+                domain: target.domain,
+                port: target.port,
+            },
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("host not found"))?;
+    queue_host_probe(state.clone(), host.clone());
+    state.publish(ServerEvent::HostUpdated {
+        host: Box::new(host.clone()),
+    });
+    Ok(Json(host))
+}
+
+pub async fn delete_host_domain(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path((id, domain_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Host>, ApiError> {
+    let host = state
+        .db
+        .delete_host_domain(id, domain_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("domain not found"))?;
+    state.publish(ServerEvent::HostUpdated {
+        host: Box::new(host.clone()),
+    });
+    Ok(Json(host))
+}
+
+pub async fn probe_host_now(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Host>, ApiError> {
+    let host = state
+        .db
+        .get_host(id)
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("host not found"))?;
+    let host = crate::probe::refresh_host(&state, &host)
+        .await
+        .map_err(|error| ApiError::bad_gateway(error.to_string()))?;
+    state.publish(ServerEvent::HostUpdated {
+        host: Box::new(host.clone()),
+    });
+    Ok(Json(host))
+}
+
+fn queue_host_probe(state: AppState, host: Host) {
+    tokio::spawn(async move {
+        match crate::probe::refresh_host(&state, &host).await {
+            Ok(host) => state.publish(ServerEvent::HostUpdated {
+                host: Box::new(host),
+            }),
+            Err(error) => tracing::warn!("host probe failed: {error}"),
+        }
+    });
 }
 
 pub async fn delete_hosts(
@@ -637,6 +772,10 @@ pub async fn install_agent(
         .ssh_credentials(id)
         .map_err(|e| ApiError::internal(e.to_string()))?
         .unwrap_or_default();
+    let has_legacy_override = body.ssh_key_id.is_some()
+        || body.use_saved_identity
+        || !key_path.is_empty()
+        || !password.is_empty();
     if let Some(key_id) = body.ssh_key_id {
         let (_, managed_path) = state
             .db
@@ -653,8 +792,11 @@ pub async fn install_agent(
         }
         key_path = stored_identity;
         password.clear();
-    } else if key_path.is_empty() && password.is_empty() {
-        password = stored_password;
+    } else if !has_legacy_override {
+        match existing.ssh_auth_type {
+            crate::models::SshAuthType::Password => password = stored_password,
+            crate::models::SshAuthType::Key => key_path = stored_identity,
+        }
     }
 
     if existing.ssh_user.trim().is_empty() {
@@ -664,12 +806,12 @@ pub async fn install_agent(
     }
     if key_path.is_empty() && password.is_empty() {
         return Err(ApiError::bad_request(
-            "no SSH password on host and none provided; edit host to set password, or use key path / install form password",
+            "the configured SSH credential is unavailable; edit the host and save a password or SSH key",
         ));
     }
     if !key_path.is_empty() && !std::path::Path::new(&key_path).is_file() && password.is_empty() {
         return Err(ApiError::bad_request(format!(
-            "SSH key not found: {key_path}. Mount host keys (LIGHTMONITOR_SSH_DIR) or set host SSH password."
+            "SSH key not found: {key_path}. Edit the host and select an available SSH key."
         )));
     }
 
@@ -720,12 +862,6 @@ Open the admin UI via a real IP/domain, or set LIGHTMONITOR_PUBLIC_URL."
 
     match result {
         Ok(output) => {
-            if !key_path.is_empty() {
-                state
-                    .db
-                    .set_ssh_key_path(id, &key_path)
-                    .map_err(|e| ApiError::internal(e.to_string()))?;
-            }
             let summary = summarize_install_output(&output);
             push_log(&state, id, true, summary)?;
             let host = state

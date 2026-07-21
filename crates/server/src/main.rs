@@ -5,6 +5,7 @@ mod db;
 mod geo;
 mod local_monitor;
 mod models;
+mod probe;
 mod routes;
 mod ssh_keys;
 mod state;
@@ -15,6 +16,7 @@ use crate::db::Db;
 use crate::state::AppState;
 use axum::Router;
 use axum::routing::{delete, get, post, put};
+use futures_util::stream::{self, StreamExt};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -50,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .ensure_system_host_with_details(&local_address, &local_region)?;
     spawn_local_monitor(state.clone());
     spawn_offline_watcher(state.clone());
+    spawn_probe_watcher(state.clone());
 
     let api = Router::new()
         .route("/health", get(routes::health))
@@ -64,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
             "/ssh-keys/{id}",
             put(routes::update_ssh_key).delete(routes::delete_ssh_key),
         )
+        .route("/ssh-keys/{id}/hosts", put(routes::assign_ssh_key_hosts))
         .route("/public/hosts", get(routes::list_public_hosts))
         .route("/system/releases", get(routes::list_app_releases))
         .route("/system/releases/apply", post(routes::apply_app_release))
@@ -83,6 +87,12 @@ async fn main() -> anyhow::Result<()> {
             get(routes::get_metric_history),
         )
         .route("/hosts/{id}", put(routes::update_host))
+        .route("/hosts/{id}/domains", post(routes::add_host_domain))
+        .route(
+            "/hosts/{id}/domains/{domain_id}",
+            delete(routes::delete_host_domain),
+        )
+        .route("/hosts/{id}/probe", post(routes::probe_host_now))
         .route("/hosts/{id}/agent-token", get(routes::get_agent_token))
         .route("/hosts/{id}/install-agent", post(routes::install_agent))
         .route("/agents/register", post(routes::register_agent))
@@ -165,6 +175,35 @@ fn spawn_offline_watcher(state: AppState) {
                 }
                 Err(err) => tracing::warn!("offline scan failed: {err}"),
             }
+        }
+    });
+}
+
+fn spawn_probe_watcher(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let hosts = match state.db.list_hosts() {
+                Ok(hosts) => hosts,
+                Err(error) => {
+                    tracing::warn!("host probe list failed: {error}");
+                    continue;
+                }
+            };
+            stream::iter(hosts)
+                .for_each_concurrent(8, |host| {
+                    let state = state.clone();
+                    async move {
+                        match probe::refresh_host(&state, &host).await {
+                            Ok(host) => state.publish(models::ServerEvent::HostUpdated {
+                                host: Box::new(host),
+                            }),
+                            Err(error) => tracing::warn!("host probe failed: {error}"),
+                        }
+                    }
+                })
+                .await;
         }
     });
 }

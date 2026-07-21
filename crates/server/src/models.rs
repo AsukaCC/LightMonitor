@@ -61,6 +61,10 @@ pub struct SystemSample {
     pub load_average: [f64; 3],
     pub network_rx_bytes: u64,
     pub network_tx_bytes: u64,
+    #[serde(default)]
+    pub network_rx_rate: Option<f64>,
+    #[serde(default)]
+    pub network_tx_rate: Option<f64>,
     pub disks: Vec<DiskSample>,
     pub collected_at: DateTime<Utc>,
 }
@@ -74,6 +78,8 @@ pub struct MetricHistoryPoint {
     pub load_one: f64,
     pub network_rx_bytes: u64,
     pub network_tx_bytes: u64,
+    pub network_rx_rate: Option<f64>,
+    pub network_tx_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +95,51 @@ pub struct InstallLog {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthType {
+    #[default]
+    Password,
+    Key,
+}
+
+impl SshAuthType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::Key => "key",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "key" => Self::Key,
+            _ => Self::Password,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostDomain {
+    pub id: Uuid,
+    pub domain: String,
+    pub port: u16,
+    pub resolved_ipv4: Vec<String>,
+    pub resolved_ipv6: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssl_expires_at: Option<DateTime<Utc>>,
+    pub ssl_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_loss_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Host {
     pub id: Uuid,
@@ -96,8 +147,26 @@ pub struct Host {
     pub name: String,
     pub address: String,
     pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub resolved_ipv4: Vec<String>,
+    pub resolved_ipv6: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_loss_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_probed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+    pub domains: Vec<HostDomain>,
     pub ssh_user: String,
     pub ssh_port: u16,
+    pub ssh_auth_type: SshAuthType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key_name: Option<String>,
     pub update_interval_seconds: u64,
     /// Whether an SSH password is stored (password itself is never returned).
     pub has_ssh_password: bool,
@@ -127,6 +196,8 @@ pub struct PublicMetrics {
     pub disk_percent: f32,
     pub load_average: [f64; 3],
     pub uptime_seconds: u64,
+    pub network_rx_rate: f64,
+    pub network_tx_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +205,15 @@ pub struct PublicHost {
     pub id: Uuid,
     pub name: String,
     pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub resolved_ipv4: Vec<String>,
+    pub resolved_ipv6: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packet_loss_percent: Option<f64>,
+    pub domains: Vec<HostDomain>,
     pub tags: Vec<String>,
     pub status: HostStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,6 +263,8 @@ impl Host {
                 disk_percent,
                 load_average: sample.load_average,
                 uptime_seconds: sample.uptime_seconds,
+                network_rx_rate: sample.network_rx_rate.unwrap_or(0.0),
+                network_tx_rate: sample.network_tx_rate.unwrap_or(0.0),
             }
         });
 
@@ -190,6 +272,12 @@ impl Host {
             id: self.id,
             name: self.name.clone(),
             region: self.region.clone(),
+            expires_at: self.expires_at,
+            resolved_ipv4: self.resolved_ipv4.clone(),
+            resolved_ipv6: self.resolved_ipv6.clone(),
+            latency_ms: self.latency_ms,
+            packet_loss_percent: self.packet_loss_percent,
+            domains: self.domains.clone(),
             tags: self.tags.clone(),
             status: self.status.clone(),
             metrics,
@@ -204,8 +292,14 @@ pub struct CreateHostRequest {
     pub address: String,
     #[serde(default)]
     pub region: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     pub ssh_user: String,
     pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_auth_type: SshAuthType,
+    #[serde(default)]
+    pub ssh_key_id: Option<Uuid>,
     /// Optional SSH password for remote install (stored server-side only).
     #[serde(default)]
     pub ssh_password: String,
@@ -219,8 +313,14 @@ pub struct UpdateHostRequest {
     pub address: String,
     #[serde(default)]
     pub region: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     pub ssh_user: String,
     pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_auth_type: SshAuthType,
+    #[serde(default)]
+    pub ssh_key_id: Option<Uuid>,
     /// Empty = keep existing password; non-empty = replace; use clear_ssh_password to remove.
     #[serde(default)]
     pub ssh_password: String,
@@ -241,6 +341,17 @@ pub struct DeleteHostsRequest {
 pub struct UpdateHostIntervalRequest {
     pub ids: Vec<Uuid>,
     pub interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateHostDomainRequest {
+    pub domain: String,
+    #[serde(default = "default_https_port")]
+    pub port: u16,
+}
+
+fn default_https_port() -> u16 {
+    443
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -315,6 +426,14 @@ pub struct SshKey {
     pub size_bytes: u64,
     pub updated_at: DateTime<Utc>,
     pub in_use: bool,
+    pub host_ids: Vec<Uuid>,
+    pub host_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssignSshKeyHostsRequest {
+    #[serde(default)]
+    pub host_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]

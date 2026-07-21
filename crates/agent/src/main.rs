@@ -4,7 +4,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, System};
 use uuid::Uuid;
 
@@ -58,6 +58,10 @@ struct SystemSample {
     load_average: [f64; 3],
     network_rx_bytes: u64,
     network_tx_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_rx_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_tx_rate: Option<f64>,
     disks: Vec<DiskSample>,
     collected_at: DateTime<Utc>,
 }
@@ -81,13 +85,18 @@ async fn main() -> anyhow::Result<()> {
     let mut system = System::new_all();
     let mut disks = Disks::new_with_refreshed_list();
     let mut networks = Networks::new_with_refreshed_list();
+    let mut last_network_refresh = None;
 
     loop {
         system.refresh_all();
         disks.refresh(true);
         networks.refresh(true);
+        let refreshed_at = Instant::now();
+        let network_elapsed = last_network_refresh
+            .replace(refreshed_at)
+            .map(|previous| refreshed_at.duration_since(previous));
 
-        let sample = collect_sample(&system, &disks, &networks);
+        let sample = collect_sample(&system, &disks, &networks, network_elapsed);
         let report = MetricReport {
             agent_id,
             token: config.token.clone(),
@@ -204,15 +213,28 @@ fn server_interval(seconds: u64) -> Option<Duration> {
         .then(|| Duration::from_secs(seconds))
 }
 
-fn collect_sample(system: &System, disks: &Disks, networks: &Networks) -> SystemSample {
+fn collect_sample(
+    system: &System,
+    disks: &Disks,
+    networks: &Networks,
+    network_elapsed: Option<Duration>,
+) -> SystemSample {
     let load = System::load_average();
-    let (network_rx_bytes, network_tx_bytes) =
-        networks.iter().fold((0, 0), |(rx, tx), (_, network)| {
-            (
-                rx + network.total_received(),
-                tx + network.total_transmitted(),
-            )
-        });
+    let (network_rx_bytes, network_tx_bytes, network_rx_delta, network_tx_delta) =
+        networks.iter().fold(
+            (0, 0, 0, 0),
+            |(rx, tx, rx_delta, tx_delta), (_, network)| {
+                (
+                    rx + network.total_received(),
+                    tx + network.total_transmitted(),
+                    rx_delta + network.received(),
+                    tx_delta + network.transmitted(),
+                )
+            },
+        );
+    let elapsed_seconds = network_elapsed
+        .map(|elapsed| elapsed.as_secs_f64())
+        .filter(|elapsed| *elapsed >= 0.1);
 
     SystemSample {
         hostname: System::host_name().unwrap_or_else(|| "unknown".to_string()),
@@ -230,6 +252,8 @@ fn collect_sample(system: &System, disks: &Disks, networks: &Networks) -> System
         load_average: [load.one, load.five, load.fifteen],
         network_rx_bytes,
         network_tx_bytes,
+        network_rx_rate: elapsed_seconds.map(|elapsed| network_rx_delta as f64 / elapsed),
+        network_tx_rate: elapsed_seconds.map(|elapsed| network_tx_delta as f64 / elapsed),
         disks: disks
             .iter()
             .map(|disk| DiskSample {

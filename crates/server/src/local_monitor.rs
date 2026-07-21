@@ -1,6 +1,7 @@
 use crate::models::{DiskSample, SystemSample};
 use chrono::Utc;
 use std::net::UdpSocket;
+use std::time::Instant;
 use sysinfo::{Disks, Networks, System};
 
 pub fn hostname() -> String {
@@ -21,6 +22,7 @@ pub struct LocalCollector {
     system: System,
     disks: Disks,
     networks: Networks,
+    last_network_refresh: Option<Instant>,
 }
 
 impl LocalCollector {
@@ -29,6 +31,7 @@ impl LocalCollector {
             system: System::new_all(),
             disks: Disks::new_with_refreshed_list(),
             networks: Networks::new_with_refreshed_list(),
+            last_network_refresh: None,
         }
     }
 
@@ -36,15 +39,26 @@ impl LocalCollector {
         self.system.refresh_all();
         self.disks.refresh(true);
         self.networks.refresh(true);
+        let refreshed_at = Instant::now();
+        let network_elapsed = self
+            .last_network_refresh
+            .replace(refreshed_at)
+            .map(|previous| refreshed_at.duration_since(previous).as_secs_f64())
+            .filter(|elapsed| *elapsed >= 0.1);
 
         let load = System::load_average();
-        let (network_rx_bytes, network_tx_bytes) =
-            self.networks.iter().fold((0, 0), |(rx, tx), (_, network)| {
-                (
-                    rx + network.total_received(),
-                    tx + network.total_transmitted(),
-                )
-            });
+        let (network_rx_bytes, network_tx_bytes, network_rx_delta, network_tx_delta) =
+            self.networks.iter().fold(
+                (0, 0, 0, 0),
+                |(rx, tx, rx_delta, tx_delta), (_, network)| {
+                    (
+                        rx + network.total_received(),
+                        tx + network.total_transmitted(),
+                        rx_delta + network.received(),
+                        tx_delta + network.transmitted(),
+                    )
+                },
+            );
 
         SystemSample {
             hostname: hostname(),
@@ -62,6 +76,8 @@ impl LocalCollector {
             load_average: [load.one, load.five, load.fifteen],
             network_rx_bytes,
             network_tx_bytes,
+            network_rx_rate: network_elapsed.map(|elapsed| network_rx_delta as f64 / elapsed),
+            network_tx_rate: network_elapsed.map(|elapsed| network_tx_delta as f64 / elapsed),
             disks: self
                 .disks
                 .iter()

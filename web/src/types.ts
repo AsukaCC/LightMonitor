@@ -35,6 +35,21 @@ export type InstallLog = {
   message: string
 }
 
+export type HostDomain = {
+  id: string
+  domain: string
+  port: number
+  resolved_ipv4: string[]
+  resolved_ipv6: string[]
+  ssl_expires_at?: string
+  ssl_status: 'pending' | 'valid' | 'expiring' | 'expired' | 'unavailable'
+  latency_ms?: number
+  packet_loss_percent?: number
+  last_checked_at?: string
+  last_error?: string
+  created_at: string
+}
+
 export type MetricHistoryPoint = {
   collected_at: string
   cpu_percent: number
@@ -43,6 +58,8 @@ export type MetricHistoryPoint = {
   load_one: number
   network_rx_bytes: number
   network_tx_bytes: number
+  network_rx_rate?: number
+  network_tx_rate?: number
 }
 
 export type MetricHistoryResponse = {
@@ -56,8 +73,19 @@ export type Host = {
   name: string
   address: string
   region: string
+  expires_at?: string
+  resolved_ipv4: string[]
+  resolved_ipv6: string[]
+  latency_ms?: number
+  packet_loss_percent?: number
+  last_probed_at?: string
+  probe_error?: string
+  domains: HostDomain[]
   ssh_user: string
   ssh_port: number
+  ssh_auth_type: 'password' | 'key'
+  ssh_key_id?: string
+  ssh_key_name?: string
   update_interval_seconds: number
   has_ssh_password: boolean
   has_ssh_identity: boolean
@@ -76,6 +104,8 @@ export type SshKey = {
   size_bytes: number
   updated_at: string
   in_use: boolean
+  host_ids: string[]
+  host_names: string[]
 }
 
 export type PublicMetrics = {
@@ -89,12 +119,20 @@ export type PublicMetrics = {
   disk_percent: number
   load_average: [number, number, number]
   uptime_seconds: number
+  network_rx_rate: number
+  network_tx_rate: number
 }
 
 export type PublicHost = {
   id: string
   name: string
   region: string
+  expires_at?: string
+  resolved_ipv4: string[]
+  resolved_ipv6: string[]
+  latency_ms?: number
+  packet_loss_percent?: number
+  domains: HostDomain[]
   tags: string[]
   status: HostStatus
   metrics?: PublicMetrics
@@ -111,8 +149,11 @@ export type HostForm = {
   address: string
   ssh_user: string
   ssh_port: string
+  ssh_auth_type: 'password' | 'key'
+  ssh_key_id: string
   ssh_password: string
   clear_ssh_password: boolean
+  expires_at: string
   tags: string
 }
 
