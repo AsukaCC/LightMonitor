@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,20 +269,67 @@ impl Host {
             }
         });
 
+        let domains = self.domains.iter().map(mask_public_domain).collect();
+
         PublicHost {
             id: self.id,
             name: self.name.clone(),
             region: self.region.clone(),
             expires_at: self.expires_at,
-            resolved_ipv4: self.resolved_ipv4.clone(),
-            resolved_ipv6: self.resolved_ipv6.clone(),
+            resolved_ipv4: mask_public_addresses(&self.resolved_ipv4),
+            resolved_ipv6: mask_public_addresses(&self.resolved_ipv6),
             latency_ms: self.latency_ms,
             packet_loss_percent: self.packet_loss_percent,
-            domains: self.domains.clone(),
+            domains,
             tags: self.tags.clone(),
             status: self.status.clone(),
             metrics,
             last_seen: self.last_seen,
+        }
+    }
+}
+
+fn mask_public_addresses(addresses: &[String]) -> Vec<String> {
+    let mut masked = Vec::new();
+    for address in addresses {
+        if let Some(address) = mask_public_ip(address)
+            && !masked.contains(&address)
+        {
+            masked.push(address);
+        }
+    }
+    masked
+}
+
+fn mask_public_domain(domain: &HostDomain) -> HostDomain {
+    let mut public = domain.clone();
+    public.resolved_ipv4 = mask_public_addresses(&domain.resolved_ipv4);
+    public.resolved_ipv6 = mask_public_addresses(&domain.resolved_ipv6);
+    public.last_error = None;
+    public
+}
+
+fn mask_public_ip(address: &str) -> Option<String> {
+    let trimmed = address.trim();
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let without_zone = unbracketed
+        .split_once('%')
+        .map_or(unbracketed, |(ip, _)| ip);
+
+    match without_zone.parse::<IpAddr>().ok()? {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            Some(format!("{}.{}.*.*", octets[0], octets[1]))
+        }
+        IpAddr::V6(address) => {
+            let segments = address.segments();
+            Some(format!(
+                "{:x}:{:x}:{:x}:{:x}:*:*:*:*",
+                segments[0], segments[1], segments[2], segments[3]
+            ))
         }
     }
 }
@@ -483,4 +531,68 @@ pub struct AgentTokenResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HostDomain, mask_public_addresses, mask_public_domain, mask_public_ip};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    #[test]
+    fn masks_public_ipv4_addresses() {
+        assert_eq!(mask_public_ip("203.0.113.42").as_deref(), Some("203.0.*.*"));
+        assert_eq!(
+            mask_public_ip(" 192.168.1.8 ").as_deref(),
+            Some("192.168.*.*")
+        );
+    }
+
+    #[test]
+    fn masks_public_ipv6_addresses_and_zone_ids() {
+        assert_eq!(
+            mask_public_ip("2001:db8:abcd:12::99").as_deref(),
+            Some("2001:db8:abcd:12:*:*:*:*")
+        );
+        assert_eq!(
+            mask_public_ip("[fe80::1%eth0]").as_deref(),
+            Some("fe80:0:0:0:*:*:*:*")
+        );
+    }
+
+    #[test]
+    fn omits_invalid_public_addresses() {
+        assert_eq!(mask_public_ip("not-an-ip"), None);
+        assert_eq!(mask_public_ip(""), None);
+    }
+
+    #[test]
+    fn deduplicates_masked_addresses_and_sanitizes_public_domains() {
+        let addresses = vec![
+            "203.0.113.10".to_string(),
+            "203.0.114.20".to_string(),
+            "invalid".to_string(),
+        ];
+        assert_eq!(mask_public_addresses(&addresses), vec!["203.0.*.*"]);
+
+        let domain = HostDomain {
+            id: Uuid::new_v4(),
+            domain: "example.com".to_string(),
+            port: 443,
+            resolved_ipv4: vec!["198.51.100.42".to_string()],
+            resolved_ipv6: vec!["2001:db8:abcd:12::42".to_string()],
+            ssl_expires_at: None,
+            ssl_status: "valid".to_string(),
+            latency_ms: Some(12.0),
+            packet_loss_percent: Some(0.0),
+            last_checked_at: Some(Utc::now()),
+            last_error: Some("connect to 198.51.100.42 failed".to_string()),
+            created_at: Utc::now(),
+        };
+        let public = mask_public_domain(&domain);
+
+        assert_eq!(public.resolved_ipv4, vec!["198.51.*.*"]);
+        assert_eq!(public.resolved_ipv6, vec!["2001:db8:abcd:12:*:*:*:*"]);
+        assert_eq!(public.last_error, None);
+    }
 }
