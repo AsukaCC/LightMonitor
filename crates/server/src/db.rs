@@ -7,7 +7,6 @@ use crate::probe::{DomainProbeResult, HostProbeResult};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -388,75 +387,6 @@ impl Db {
                 params![id.to_string()],
             )?;
             Ok(Some(storage_path))
-        })
-    }
-
-    pub fn assign_ssh_key_hosts(&self, id: Uuid, host_ids: &[Uuid]) -> Result<Vec<Host>> {
-        self.with_conn(|conn| {
-            let storage_path = conn
-                .query_row(
-                    "SELECT storage_path FROM ssh_keys WHERE id = ?1",
-                    params![id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .context("SSH key not found")?;
-            let requested = host_ids.iter().copied().collect::<HashSet<_>>();
-            if requested.len() != host_ids.len() {
-                bail!("duplicate host assignment");
-            }
-
-            for host_id in &requested {
-                let assignable = conn
-                    .query_row(
-                        "SELECT is_system = 0 FROM hosts WHERE id = ?1",
-                        params![host_id.to_string()],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false);
-                if !assignable {
-                    bail!("host {host_id} does not exist or cannot use an SSH key");
-                }
-            }
-
-            let mut statement =
-                conn.prepare("SELECT id FROM hosts WHERE ssh_key_id = ?1 OR ssh_key_path = ?2")?;
-            let existing = statement
-                .query_map(params![id.to_string(), storage_path], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .filter_map(|row| row.ok())
-                .filter_map(|host_id| Uuid::parse_str(&host_id).ok())
-                .collect::<HashSet<_>>();
-
-            for host_id in existing.difference(&requested) {
-                conn.execute(
-                    "UPDATE hosts SET ssh_auth_type = 'password', ssh_key_id = NULL,
-                     ssh_key_path = '', updated_at = ?1 WHERE id = ?2",
-                    params![Utc::now().to_rfc3339(), host_id.to_string()],
-                )?;
-            }
-            for host_id in &requested {
-                conn.execute(
-                    "UPDATE hosts SET ssh_auth_type = 'key', ssh_key_id = ?1,
-                     ssh_key_path = ?2, ssh_password = '', updated_at = ?3 WHERE id = ?4",
-                    params![
-                        id.to_string(),
-                        storage_path,
-                        Utc::now().to_rfc3339(),
-                        host_id.to_string(),
-                    ],
-                )?;
-            }
-
-            let mut hosts = Vec::new();
-            for host_id in existing.union(&requested) {
-                if let Some(host) = get_host_conn(conn, *host_id)? {
-                    hosts.push(host);
-                }
-            }
-            Ok(hosts)
         })
     }
 
@@ -1813,24 +1743,39 @@ mod tests {
                     expires_at: None,
                     ssh_user: "root".to_string(),
                     ssh_port: 22,
-                    ssh_auth_type: SshAuthType::Password,
-                    ssh_key_id: None,
+                    ssh_auth_type: SshAuthType::Key,
+                    ssh_key_id: Some(key_id),
                     ssh_password: String::new(),
                     tags: Vec::new(),
                 },
                 "key-host-token".to_string(),
             )
             .unwrap();
-        let assigned = db.assign_ssh_key_hosts(key_id, &[host.id]).unwrap();
-        assert_eq!(assigned[0].ssh_auth_type, SshAuthType::Key);
-        assert_eq!(assigned[0].ssh_key_id, Some(key_id));
         let key = &db.list_ssh_keys().unwrap()[0];
         assert!(key.in_use);
         assert_eq!(key.host_ids, vec![host.id]);
+        assert_eq!(key.host_names, vec!["key-host"]);
         assert!(db.delete_ssh_key(key_id).is_err());
 
-        db.assign_ssh_key_hosts(key_id, &[]).unwrap();
-        let host = db.get_host(host.id).unwrap().unwrap();
+        let host = db
+            .update_host(
+                host.id,
+                UpdateHostRequest {
+                    name: host.name,
+                    address: host.address,
+                    region: host.region,
+                    expires_at: host.expires_at,
+                    ssh_user: host.ssh_user,
+                    ssh_port: host.ssh_port,
+                    ssh_auth_type: SshAuthType::Password,
+                    ssh_key_id: None,
+                    ssh_password: String::new(),
+                    clear_ssh_password: false,
+                    tags: host.tags,
+                },
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(host.ssh_auth_type, SshAuthType::Password);
         assert_eq!(host.ssh_key_id, None);
         assert_eq!(db.delete_ssh_key(key_id).unwrap(), Some(storage_path));

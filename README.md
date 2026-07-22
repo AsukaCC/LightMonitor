@@ -84,7 +84,7 @@ docker compose -f docker-compose.release.yml up -d --pull always
 
 打开 `http://服务器IP:8080`，进入 `/admin` 添加远程主机；先在“密钥管理”上传服务器上的 SSH 私钥，再在安装窗口选择它部署 Agent。私钥保存在 `lightmonitor-data` 数据卷，不需要把本地路径填写到容器内。旧版也可继续只读挂载 `/root/.ssh` 并使用容器内路径。
 
-版本升级和回退位于“版本管理”。服务会校验 Release 包的 SHA-256、切换数据卷中的活动版本并自动重启；若新版本启动失败，启动器会恢复上一个版本。该功能要求容器能够访问 GitHub。
+版本升级和回退位于“版本管理”。服务会校验 Release 包的 SHA-256，并将每个版本完整安装到数据卷中的独立目录；除当前使用版本外，任意旧版本（包括初始版本）均可删除，且不会影响当前版本运行。若新版本启动失败，启动器会恢复另一个仍完整存在的版本。该功能要求容器能够访问 GitHub。
 
 数据和凭据位于 `lightmonitor-data` 卷。备份时必须保留 `lightmonitor.db`、`lightmonitor.key` 和 `ssh-keys/`；丢失加密密钥后已保存的 SSH 密码无法恢复，丢失 `ssh-keys/` 后上传的私钥也无法使用。
 
@@ -168,7 +168,7 @@ docker compose -f docker-compose.release.yml up -d --pull always
 
 `http://サーバーIP:8080` を開き、`/admin` でリモートホストを追加します。先に「鍵管理」で SSH 秘密鍵をアップロードし、インストール画面で選択してください。鍵は `lightmonitor-data` データボリュームに保存されます。旧版の `/root/.ssh` 読み取り専用マウントも引き続き利用できます。
 
-「バージョン管理」では Release パッケージの SHA-256 を検証して更新またはロールバックします。サービスは自動再起動し、新バージョンの起動に失敗した場合は以前のバージョンへ戻ります。この機能には GitHub への接続が必要です。
+「バージョン管理」では Release パッケージの SHA-256 を検証し、各バージョンをデータボリューム内の独立したディレクトリへ完全にインストールします。現在使用中のバージョン以外は、初期バージョンを含めて削除でき、実行中のバージョンには影響しません。新バージョンの起動に失敗した場合は、完全な状態で残っている別のバージョンへ戻ります。この機能には GitHub への接続が必要です。
 
 データは `lightmonitor-data` ボリュームにあります。バックアップ時は `lightmonitor.db`、`lightmonitor.key`、`ssh-keys/` を保存してください。暗号化鍵を失うと保存済み SSH パスワードを復元できず、`ssh-keys/` を失うとアップロード済み秘密鍵を使用できません。
 
@@ -252,7 +252,7 @@ docker compose -f docker-compose.release.yml up -d --pull always
 
 Open `http://SERVER_IP:8080`, then use `/admin` to add remote hosts. Upload the server's SSH private key in Key management and select it in the installation dialog. The key is stored in the `lightmonitor-data` volume on the server, so a local workstation path is not sent to the container. Legacy identity files mounted read-only at `/root/.ssh` remain supported.
 
-Version Management verifies each Release bundle with SHA-256, switches the active version in the data volume, and restarts the service. The launcher restores the previous version if the selected version fails to start. GitHub access is required for this feature.
+Version Management verifies each Release bundle with SHA-256 and installs every version into a complete, independent directory in the data volume. Any old version, including the initial version, can be removed without affecting the running version; only the active version is protected. If a selected version fails, the launcher restores another complete installed version. GitHub access is required for this feature.
 
 Application data lives in the `lightmonitor-data` volume. Back up `lightmonitor.db`, `lightmonitor.key`, and `ssh-keys/`; saved SSH passwords cannot be recovered without the encryption key, and uploaded private keys cannot be used without `ssh-keys/`.
 

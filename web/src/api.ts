@@ -153,12 +153,10 @@ export async function deleteSshKey(id: string, token: string, onUnauthorized?: (
   if (!response.ok) throw new Error(await readError(response))
 }
 
-export async function assignSshKeyHosts(id: string, hostIds: string[], token: string, onUnauthorized?: () => void) {
-  const response = await authFetch(`/api/ssh-keys/${encodeURIComponent(id)}/hosts`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host_ids: hostIds }),
-  }, token, onUnauthorized)
+export async function downloadSshKey(id: string, token: string, onUnauthorized?: () => void) {
+  const response = await authFetch(`/api/ssh-keys/${encodeURIComponent(id)}/download`, undefined, token, onUnauthorized)
   if (!response.ok) throw new Error(await readError(response))
-  return (await response.json()) as SshKey
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const fileName = disposition.match(/filename="([^"]+)"/)?.[1] ?? `ssh-key-${id}.key`
+  return { blob: await response.blob(), fileName }
 }

@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
             "/ssh-keys/{id}",
             put(routes::update_ssh_key).delete(routes::delete_ssh_key),
         )
-        .route("/ssh-keys/{id}/hosts", put(routes::assign_ssh_key_hosts))
+        .route("/ssh-keys/{id}/download", get(routes::download_ssh_key))
         .route("/public/hosts", get(routes::list_public_hosts))
         .route("/system/releases", get(routes::list_app_releases))
         .route("/system/releases/apply", post(routes::apply_app_release))

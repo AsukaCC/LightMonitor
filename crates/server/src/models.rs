@@ -430,12 +430,6 @@ pub struct SshKey {
     pub host_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AssignSshKeyHostsRequest {
-    #[serde(default)]
-    pub host_ids: Vec<Uuid>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct AppRelease {
     pub version: String,
