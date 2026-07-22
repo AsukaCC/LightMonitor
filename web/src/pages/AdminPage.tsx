@@ -1728,7 +1728,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
   }
 
   async function deleteVersion(version: string) {
-    if (!window.confirm(t('确认删除已下载版本 {version}？', { version }))) return
+    if (!window.confirm(t('确认删除已安装版本 {version}？', { version }))) return
     setDeletingVersion(version)
     setVersionError('')
     try {
@@ -1784,7 +1784,7 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
                 <div className="version-title">
                   <strong>v{release.version}</strong>
                   {release.active && <span className="tag">{t('当前使用')}</span>}
-                  {release.installed && !release.active && <span className="tag">{t('已下载')}</span>}
+                  {release.installed && !release.active && <span className="tag">{t('已安装')}</span>}
                   {release.prerelease && <span className="tag">{t('预发布')}</span>}
                 </div>
                 <span>{release.name}</span>
@@ -1799,11 +1799,11 @@ function VersionPanel({ token, onUnauthorized }: { token: string; onUnauthorized
                 </a>
                 {catalog.managed_updates && release.can_delete && (
                   <button
-                    aria-label={t('删除已下载版本')}
+                    aria-label={t('删除已安装版本')}
                     className="icon-btn danger"
                     disabled={!canDelete}
                     onClick={() => void deleteVersion(release.version)}
-                    title={t('删除已下载版本')}
+                    title={t('删除已安装版本')}
                     type="button"
                   >
                     {deletingVersion === release.version ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}

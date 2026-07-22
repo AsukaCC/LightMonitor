@@ -45,12 +45,10 @@ pub async fn release_catalog(state: &AppState) -> anyhow::Result<ReleaseCatalog>
             .and_then(|expected| release.assets.iter().find(|asset| asset.name == *expected));
         let version = normalize_version(&release.tag_name);
         let installed = valid_version_dir(&version_dir(state, &version));
-        let can_delete = can_delete_downloaded_version(state, &version);
+        let can_delete = can_delete_installed_version(state, &version);
         catalog_releases.push(AppRelease {
             installed,
-            // The launcher uses the bundled runtime for its default version,
-            // even when a same-version copy exists in the data volume.
-            active: version == current && !(version == bundled_version && installed),
+            active: version == current,
             version,
             name: release.name.unwrap_or(release.tag_name),
             published_at: release.published_at,
@@ -111,7 +109,7 @@ pub async fn install_and_activate(state: &AppState, requested: &str) -> anyhow::
     Ok(requested)
 }
 
-pub fn delete_downloaded_version(state: &AppState, requested: &str) -> anyhow::Result<bool> {
+pub fn delete_installed_version(state: &AppState, requested: &str) -> anyhow::Result<bool> {
     let requested = normalize_version(requested);
     validate_version(&requested)?;
 
@@ -122,14 +120,14 @@ pub fn delete_downloaded_version(state: &AppState, requested: &str) -> anyhow::R
         Err(error) => return Err(error.into()),
     };
     if !metadata.file_type().is_dir() {
-        bail!("invalid downloaded version directory");
+        bail!("invalid installed version directory");
     }
-    if !can_delete_downloaded_version(state, &requested) {
+    if !can_delete_installed_version(state, &requested) {
         bail!("cannot delete the running version");
     }
 
     fs::remove_dir_all(&destination)
-        .with_context(|| format!("failed to delete downloaded version {requested}"))?;
+        .with_context(|| format!("failed to delete installed version {requested}"))?;
 
     let previous_file = state.config.data_dir.join("previous-version");
     if fs::read_to_string(&previous_file)
@@ -303,29 +301,42 @@ fn running_version_from_env(value: Option<String>, bundled_version: &str) -> Str
         .unwrap_or_else(|| bundled_version.to_string())
 }
 
-fn can_delete_downloaded_version(state: &AppState, requested: &str) -> bool {
-    can_delete_downloaded_version_with_runtime_dir(
+fn can_delete_installed_version(state: &AppState, requested: &str) -> bool {
+    let bundled_version = bundled_version();
+    let current = current_running_version(&bundled_version);
+    let active = read_version_pointer(&state.config.data_dir.join("active-version"));
+    can_delete_installed_version_with_context(
         state,
         requested,
+        &current,
+        active.as_deref(),
         current_runtime_dir().as_deref(),
     )
 }
 
-fn can_delete_downloaded_version_with_runtime_dir(
+fn can_delete_installed_version_with_context(
     state: &AppState,
     requested: &str,
+    current: &str,
+    active: Option<&str>,
     runtime_dir: Option<&Path>,
 ) -> bool {
     let destination = version_dir(state, requested);
     if !valid_version_dir(&destination)
+        || requested == current
+        || active == Some(requested)
         || runtime_dir.is_some_and(|path| same_existing_path(&destination, path))
     {
         return false;
     }
+    true
+}
 
-    let bundled_version = bundled_version();
-    let current = current_running_version(&bundled_version);
-    current != requested || requested == bundled_version || runtime_dir.is_some()
+fn read_version_pointer(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|version| normalize_version(&version))
+        .filter(|version| validate_version(version).is_ok())
 }
 
 fn current_runtime_dir() -> Option<PathBuf> {
@@ -424,6 +435,36 @@ mod tests {
         assert_eq!(running_version_from_env(None, "1.0.1"), "1.0.1");
     }
 
+    fn test_state(root: &Path, versions_dir: PathBuf) -> AppState {
+        let data_dir = root.join("data");
+        let db = Db::open(&data_dir.join("lightmonitor.db")).unwrap();
+        let config = Config {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            data_dir: data_dir.clone(),
+            web_dir: root.join("web"),
+            releases_dir: root.join("releases"),
+            versions_dir,
+            ssh_keys_dir: data_dir.join("ssh-keys"),
+            public_url: String::new(),
+            github_repo: "owner/repo".to_string(),
+            managed_updates: true,
+            admin_username: "admin".to_string(),
+            admin_password: "admin".to_string(),
+            offline_seconds: 30,
+            session_ttl_hours: 24,
+        };
+        AppState::new(db, config)
+    }
+
+    fn create_runtime(versions_dir: &Path, version: &str) -> PathBuf {
+        let version_dir = versions_dir.join(version);
+        fs::create_dir_all(version_dir.join("web")).unwrap();
+        fs::write(version_dir.join("lightmonitor-server"), b"server").unwrap();
+        fs::write(version_dir.join("web/index.html"), b"index").unwrap();
+        version_dir
+    }
+
     #[test]
     fn keeps_the_current_runtime_directory() {
         let root =
@@ -431,68 +472,72 @@ mod tests {
         let data_dir = root.join("data");
         let versions_dir = data_dir.join("versions");
         let version_dir = versions_dir.join("2.0.0");
-        fs::create_dir_all(version_dir.join("web")).unwrap();
-        fs::write(version_dir.join("lightmonitor-server"), b"server").unwrap();
-        fs::write(version_dir.join("web/index.html"), b"index").unwrap();
-        let db = Db::open(&data_dir.join("lightmonitor.db")).unwrap();
-        let config = Config {
-            host: "127.0.0.1".to_string(),
-            port: 8080,
-            data_dir: data_dir.clone(),
-            web_dir: root.join("web"),
-            releases_dir: root.join("releases"),
-            versions_dir,
-            ssh_keys_dir: data_dir.join("ssh-keys"),
-            public_url: String::new(),
-            github_repo: "owner/repo".to_string(),
-            managed_updates: true,
-            admin_username: "admin".to_string(),
-            admin_password: "admin".to_string(),
-            offline_seconds: 30,
-            session_ttl_hours: 24,
-        };
-        let state = AppState::new(db, config);
+        create_runtime(&versions_dir, "2.0.0");
+        let state = test_state(&root, versions_dir);
 
-        assert!(!can_delete_downloaded_version_with_runtime_dir(
+        assert!(!can_delete_installed_version_with_context(
             &state,
             "2.0.0",
+            "1.0.0",
+            None,
             Some(&version_dir)
         ));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn deletes_a_non_active_copy_of_the_bundled_version() {
+    fn protects_current_and_configured_active_versions() {
+        let root =
+            std::env::temp_dir().join(format!("lightmonitor-version-protect-{}", Uuid::new_v4()));
+        let versions_dir = root.join("data/versions");
+        create_runtime(&versions_dir, "1.0.0");
+        create_runtime(&versions_dir, "2.0.0");
+        let state = test_state(&root, versions_dir);
+
+        assert!(!can_delete_installed_version_with_context(
+            &state,
+            "2.0.0",
+            "2.0.0",
+            Some("2.0.0"),
+            None,
+        ));
+        assert!(!can_delete_installed_version_with_context(
+            &state,
+            "1.0.0",
+            "2.0.0",
+            Some("1.0.0"),
+            None,
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deletes_a_non_active_initial_version_and_clears_rollback_pointer() {
         let root =
             std::env::temp_dir().join(format!("lightmonitor-version-delete-{}", Uuid::new_v4()));
         let data_dir = root.join("data");
         let versions_dir = data_dir.join("versions");
-        let version = env!("CARGO_PKG_VERSION");
-        let version_dir = versions_dir.join(version);
-        fs::create_dir_all(version_dir.join("web")).unwrap();
-        fs::write(version_dir.join("lightmonitor-server"), b"server").unwrap();
-        fs::write(version_dir.join("web/index.html"), b"index").unwrap();
-        let db = Db::open(&data_dir.join("lightmonitor.db")).unwrap();
-        let config = Config {
-            host: "127.0.0.1".to_string(),
-            port: 8080,
-            data_dir: data_dir.clone(),
-            web_dir: root.join("web"),
-            releases_dir: root.join("releases"),
-            versions_dir,
-            ssh_keys_dir: data_dir.join("ssh-keys"),
-            public_url: String::new(),
-            github_repo: "owner/repo".to_string(),
-            managed_updates: true,
-            admin_username: "admin".to_string(),
-            admin_password: "admin".to_string(),
-            offline_seconds: 30,
-            session_ttl_hours: 24,
-        };
-        let state = AppState::new(db, config);
+        let version = "1.0.0";
+        let version_dir = create_runtime(&versions_dir, version);
+        fs::write(data_dir.join("previous-version"), version).unwrap();
+        let state = test_state(&root, versions_dir);
 
-        assert!(delete_downloaded_version(&state, version).unwrap());
+        assert!(delete_installed_version(&state, version).unwrap());
         assert!(!version_dir.exists());
+        assert!(!data_dir.join("previous-version").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_only_valid_version_pointers() {
+        let root =
+            std::env::temp_dir().join(format!("lightmonitor-version-pointer-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let pointer = root.join("active-version");
+        fs::write(&pointer, "v2.1.0\n").unwrap();
+        assert_eq!(read_version_pointer(&pointer).as_deref(), Some("2.1.0"));
+        fs::write(&pointer, "../invalid").unwrap();
+        assert_eq!(read_version_pointer(&pointer), None);
         let _ = fs::remove_dir_all(root);
     }
 }

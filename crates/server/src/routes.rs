@@ -91,12 +91,12 @@ pub async fn delete_app_release(
         .clone()
         .try_lock_owned()
         .map_err(|_| ApiError::conflict("another version change is in progress"))?;
-    let deleted = crate::updater::delete_downloaded_version(&state, &version).map_err(|error| {
+    let deleted = crate::updater::delete_installed_version(&state, &version).map_err(|error| {
         let message = error.to_string();
         if message.contains("invalid release version")
             || message.contains("active version")
             || message.contains("running version")
-            || message.contains("invalid downloaded version")
+            || message.contains("invalid installed version")
         {
             ApiError::bad_request(message)
         } else {
@@ -107,7 +107,7 @@ pub async fn delete_app_release(
 
     if !deleted {
         return Err(ApiError::not_found(format!(
-            "downloaded version {} was not found",
+            "installed version {} was not found",
             version.trim()
         )));
     }
