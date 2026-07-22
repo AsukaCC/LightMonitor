@@ -1,8 +1,8 @@
 use crate::auth::{ApiError, AuthUser, random_token};
 use crate::models::{
     AgentConfigResponse, AgentTokenResponse, ApplyReleaseRequest, ApplyReleaseResponse,
-    AssignSshKeyHostsRequest, CreateHostDomainRequest, CreateHostRequest, DeleteHostsRequest, Host,
-    HostStatus, InstallAgentRequest, InstallLog, LoginRequest, LoginResponse, MetricHistoryQuery,
+    CreateHostDomainRequest, CreateHostRequest, DeleteHostsRequest, Host, HostStatus,
+    InstallAgentRequest, InstallLog, LoginRequest, LoginResponse, MetricHistoryQuery,
     MetricHistoryResponse, MetricReport, RegisterAgentRequest, RegisterAgentResponse,
     ReleaseCatalog, ServerEvent, SessionResponse, SshKey, UpdateHostIntervalRequest,
     UpdateHostRequest,
@@ -10,7 +10,7 @@ use crate::models::{
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{Duration, Utc};
@@ -298,36 +298,53 @@ pub async fn delete_ssh_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn assign_ssh_key_hosts(
+pub async fn download_ssh_key(
     State(state): State<AppState>,
     _user: AuthUser,
     Path(id): Path<Uuid>,
-    Json(body): Json<AssignSshKeyHostsRequest>,
-) -> Result<Json<SshKey>, ApiError> {
-    let hosts = state
+) -> Result<(HeaderMap, Vec<u8>), ApiError> {
+    let (name, storage_path) = state
         .db
-        .assign_ssh_key_hosts(id, &body.host_ids)
-        .map_err(|error| {
-            let message = error.to_string();
-            if message.contains("not found") {
-                ApiError::not_found(message)
-            } else {
-                ApiError::bad_request(message)
-            }
-        })?;
-    for host in hosts {
-        state.publish(ServerEvent::HostUpdated {
-            host: Box::new(host),
-        });
-    }
-    let key = state
-        .db
-        .list_ssh_keys()
+        .get_ssh_key(id)
         .map_err(|error| ApiError::internal(error.to_string()))?
-        .into_iter()
-        .find(|key| key.id == id)
         .ok_or_else(|| ApiError::not_found("SSH key not found"))?;
-    Ok(Json(key))
+    let path = std::path::PathBuf::from(storage_path);
+    if !path.starts_with(&state.config.ssh_keys_dir) {
+        return Err(ApiError::internal(
+            "SSH key storage path is outside the key directory",
+        ));
+    }
+    let contents = fs::read(path).map_err(|error| ApiError::internal(error.to_string()))?;
+    let file_name = download_file_name(&name);
+    let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{file_name}.key\""))
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert(header::CONTENT_DISPOSITION, disposition);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((headers, contents))
+}
+
+fn download_file_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches(['.', '_']);
+    if sanitized.is_empty() {
+        "ssh-key".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 async fn read_ssh_key_upload(
@@ -1231,6 +1248,16 @@ mod tests {
         assert!(script.contains("systemctl disable --now lightmonitor-agent"));
         assert!(script.contains("/etc/systemd/system/lightmonitor-agent.service"));
         assert!(script.contains("rm -rf /opt/lightmonitor"));
+    }
+
+    #[test]
+    fn sanitizes_ssh_key_download_file_names() {
+        assert_eq!(download_file_name("production-key"), "production-key");
+        assert_eq!(
+            download_file_name("../production key\r\n"),
+            "production_key"
+        );
+        assert_eq!(download_file_name("..."), "ssh-key");
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

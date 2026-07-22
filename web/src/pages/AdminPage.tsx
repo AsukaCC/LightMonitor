@@ -1099,7 +1099,6 @@ export function AdminPage({
             hosts={hosts}
             keys={sshKeys}
             loading={sshKeysLoading}
-            onHostsReload={loadHosts}
             onReload={loadSshKeys}
             onUnauthorized={clearSession}
             token={token}

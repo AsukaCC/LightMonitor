@@ -560,21 +560,39 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 18px;
 }
 
 .ssh-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   padding: 14px 16px;
   border: 2px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-elevated-solid);
 }
 
-.ssh-key-row-main {
+.ssh-key-section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
+  margin: 22px 0 10px;
+}
+
+.ssh-key-section-head h4,
+.ssh-key-section-head p {
+  margin: 0;
+}
+
+.ssh-key-section-head h4 {
+  font-size: 0.95rem;
+}
+
+.ssh-key-section-head > div {
+  display: grid;
+  gap: 3px;
 }
 
 .ssh-key-info {
@@ -597,36 +615,60 @@
   flex-shrink: 0;
 }
 
-.ssh-key-bindings {
-  display: grid;
-  gap: 12px;
-  margin-top: 14px;
-  padding-top: 14px;
+.ssh-host-key-section {
+  margin-top: 24px;
+  padding-top: 2px;
   border-top: 2px solid var(--border);
 }
 
-.ssh-key-binding-head,
-.ssh-key-binding-actions {
+.ssh-host-key-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ssh-host-key-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.7fr);
+  align-items: center;
+  gap: 18px;
+  min-height: 66px;
+  padding: 10px 14px;
+  border-block: 1px solid var(--border);
+  background: var(--bg-elevated-solid);
+}
+
+.ssh-host-key-host,
+.ssh-host-key-value {
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 
-.ssh-key-host-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
+.ssh-host-key-host > svg,
+.ssh-host-key-value > svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
 }
 
-.ssh-key-host-list .checkbox-row {
+.ssh-host-key-host > div,
+.ssh-host-key-value > div {
   min-width: 0;
+  display: grid;
+  gap: 2px;
 }
 
-.ssh-key-host-list .checkbox-row span {
+.ssh-host-key-host strong,
+.ssh-host-key-host span,
+.ssh-host-key-value strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ssh-host-key-value.key > svg,
+.ssh-host-key-value.key strong {
+  color: var(--accent);
 }
 
 .file-picker {
@@ -723,7 +765,7 @@
     justify-content: center;
   }
 
-  .ssh-key-row-main {
+  .ssh-key-row {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -733,8 +775,9 @@
     justify-content: flex-end;
   }
 
-  .ssh-key-host-list {
+  .ssh-host-key-row {
     grid-template-columns: 1fr;
+    gap: 10px;
   }
 
   .version-overview {
